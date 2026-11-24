@@ -1,0 +1,123 @@
+"""沙箱：路径边界 + 命令策略 + 审批门。
+
+原则（§3.4）：安全边界写在**代码结构**里，不写在提示词里。
+提示词只是"请求"，guard 才是"约束"。
+"""
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+
+class SandboxViolation(Exception):
+    """越过沙箱边界。属于"策略层失败"，会关掉当前轮次而不是让模型自己改。"""
+
+
+def resolve_within(root: Path, user_path: str) -> Path:
+    """把用户给的路径解析到 workspace 内；越界直接抛异常。
+
+    用 resolve() 展开 symlink 和 ..，防止 `../../etc/passwd` 与符号链接逃逸。
+    """
+    root = Path(root).resolve()
+    raw = Path(user_path)
+    target = (root / raw).resolve() if not raw.is_absolute() else raw.resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise SandboxViolation(f"路径越界：{user_path} 不在 workspace {root} 内") from None
+    return target
+
+
+@dataclass(frozen=True)
+class CommandVerdict:
+    allowed: bool
+    reason: str = ""
+
+    @property
+    def denied(self) -> bool:
+        return not self.allowed
+
+
+# 已知危险模式。这是"负向清单"，不是完备防线——真正的防线是不给它 root 权限。
+_DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+/(?:\s|$)"), "递归删除根目录"),
+    (re.compile(r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+~(?:\s|/|$)"), "递归删除家目录"),
+    (re.compile(r"\bdd\b[^\n]*\bof=/dev/(sd|nvme|disk)"), "写裸设备"),
+    (re.compile(r"\bmkfs(\.\w+)?\b"), "格式化文件系统"),
+    (re.compile(r":\s*\(\s*\)\s*\{.*\}\s*;\s*:"), "fork bomb"),
+    (re.compile(r"\b(shutdown|reboot|halt)\b"), "关机/重启"),
+    (re.compile(r"\bsudo\b"), "提权"),
+    (re.compile(r"\b(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?(ba)?sh\b"), "管道执行远程脚本"),
+    (re.compile(r"\bchmod\s+-R\s+777\s+/(?:\s|$)"), "全局放开权限"),
+    (re.compile(r">\s*/dev/(sd|nvme|disk)"), "重定向写裸设备"),
+    (re.compile(r"\bgit\s+push\b[^\n]*--force(?!-with-lease)"), "强制推送"),
+    (re.compile(r"\bhistory\s+-c\b|\bunset\s+HISTFILE\b"), "清理痕迹"),
+]
+
+
+def check_command(command: str) -> CommandVerdict:
+    for pat, why in _DENY_PATTERNS:
+        if pat.search(command):
+            return CommandVerdict(False, f"命中危险命令模式（{why}）：{pat.pattern}")
+    return CommandVerdict(True)
+
+
+@dataclass
+class ApprovalRequest:
+    kind: str          # "bash" | "write" | "network" ...
+    detail: str
+    reason: str = ""
+
+
+# 返回 True = 批准。没有配置审批回调时按"拒绝"处理（fail closed）。
+ApprovalFn = Callable[[ApprovalRequest], bool]
+
+
+class ApprovalGate:
+    """需要人工确认的操作走这里。默认 fail closed。"""
+
+    def __init__(self, fn: ApprovalFn | None = None):
+        self._fn = fn
+        self._audit: list[tuple[ApprovalRequest, bool]] = []
+
+    @property
+    def enabled(self) -> bool:
+        return self._fn is not None
+
+    def ask(self, req: ApprovalRequest) -> bool:
+        if self._fn is None:
+            self._audit.append((req, False))
+            return False
+        ok = bool(self._fn(req))
+        self._audit.append((req, ok))
+        return ok
+
+    @property
+    def audit(self) -> list[tuple[ApprovalRequest, bool]]:
+        return list(self._audit)
+
+
+def is_binary(data: bytes) -> bool:
+    return b"\x00" in data[:4096]
+
+
+def safe_read_text(path: Path, max_bytes: int = 2_000_000) -> tuple[str, bool]:
+    """读文本文件；超限或二进制返回截断标记。"""
+    size = path.stat().st_size
+    with open(path, "rb") as fh:
+        data = fh.read(max_bytes)
+    if is_binary(data):
+        return f"(二进制文件，{size} bytes，未读取)", True
+    text = data.decode("utf-8", errors="replace")
+    return text, size > max_bytes
+
+
+def shell_env(root: Path) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "GITHUB_", "OPENAI_"))}
+    env["PWD"] = str(root)
+    env["HARNESS_WORKSPACE"] = str(root)
+    env.pop("HISTFILE", None)
+    return env

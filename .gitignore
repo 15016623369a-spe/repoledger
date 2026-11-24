@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+runs/
+examples/_demo/
+ws/
+.DS_Store

@@ -1,0 +1,407 @@
+"""Agent 主循环：turn/step 状态机 + 预算 + 断点续跑。
+
+最重要的设计：**主循环没有内存态**。
+每一次迭代都重新从日志推导"下一步该干嘛"（_next_action），
+所以进程被杀在任意一步，重开日志继续跑，行为和没崩过一样。
+"""
+from __future__ import annotations
+
+import json
+import secrets
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from .compact import CompactPolicy, compact_if_needed
+from .context import (Assembled, Budget, assemble, deadline_exceeded,
+                      estimate_messages_tokens)
+from .events import Event, EventType
+from .llm import LLMError, Provider, SimulatedCrash
+from .sandbox import ApprovalGate
+from .session import RunStats, Session
+from .subagent import (SUBAGENT_SYSTEM, child_budget, child_run_dir, new_sub_id,
+                       wrap_task)
+from .tools import (DEFAULT_PREVIEW_CHARS, Outcome, ToolCall, ToolContext,
+                    ToolRegistry, default_registry)
+
+DEFAULT_SYSTEM = """你是一个长任务自动化 agent，通过工具循环推进目标。
+
+原则：
+1. 先探明再动手。用 list_dir / read_file / grep 确认现状，不要假设。
+2. 每次只做一件可验证的小事，然后用工具验证结果，不要承诺"下一步会做"。
+3. 工具报错时读错误信息并修正参数，不要重复同样的失败调用。
+4. 大任务用 spawn_subagent 拆成自包含子任务，每个子任务描述要能让别人独立完成。
+5. 上下文有限：长输出只摘取需要的片段，不要把整个文件贴回来。
+6. 全部完成后调用 finish 提交结论。finish 是唯一的正常结束方式。
+
+不要输出寒暄、不要复述工具输出、不要解释你将要做什么——直接做。"""
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def new_run_id() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
+
+
+@dataclass
+class HarnessConfig:
+    workspace: Path
+    runs_root: Path
+    system: str = DEFAULT_SYSTEM
+    budget: Budget = field(default_factory=Budget)
+    temperature: float = 0.0
+    allow_bash: bool = True
+    max_subagent_depth: int = 1
+    preview_chars: int = DEFAULT_PREVIEW_CHARS
+    compact_policy: CompactPolicy = field(default_factory=CompactPolicy)
+
+    def to_dict(self, provider_name: str, depth: int) -> dict[str, Any]:
+        return {
+            "workspace": str(self.workspace),
+            "budget": self.budget.as_dict(),
+            "temperature": self.temperature,
+            "allow_bash": self.allow_bash,
+            "max_subagent_depth": self.max_subagent_depth,
+            "provider": provider_name,
+            "depth": depth,
+        }
+
+
+@dataclass
+class RunResult:
+    run_id: str
+    run_dir: Path
+    reason: str
+    answer: str | None
+    stats: RunStats
+    messages: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.reason in ("finish", "assistant_text")
+
+
+class Harness:
+    def __init__(self, *, provider: Provider, config: HarnessConfig,
+                 registry: ToolRegistry | None = None,
+                 approval: ApprovalGate | None = None,
+                 provider_factory: Callable[[], Provider] | None = None):
+        self.provider = provider
+        self.config = config
+        self.registry = registry or default_registry(allow_bash=config.allow_bash)
+        self.approval = approval or ApprovalGate()
+        self._provider_factory = provider_factory
+
+    # ================================================================ 入口
+    def run(self, task: str, *, run_id: str | None = None,
+            run_dir: Path | None = None) -> RunResult:
+        run_id = run_id or new_run_id()
+        run_dir = Path(run_dir) if run_dir else Path(self.config.runs_root) / run_id
+        session = Session(run_dir)
+        try:
+            if not session.events:
+                session.append(EventType.RUN_START, {
+                    "task": task,
+                    "system": self.config.system,
+                    "config": self.config.to_dict(self.provider.name, 0),
+                    "started": _now(),
+                })
+                session.append(EventType.USER_INPUT, {"text": task}, turn=0)
+            return self._drive(session)
+        finally:
+            session.close()
+
+    def resume(self, run_id_or_dir: str | Path, *, runs_root: Path | None = None) -> RunResult:
+        p = Path(run_id_or_dir)
+        run_dir = p if p.exists() else Path(runs_root or self.config.runs_root) / p
+        session = Session(run_dir)
+        try:
+            if not session.events:
+                raise FileNotFoundError(f"{run_dir} 里没有事件日志")
+            return self._drive(session)
+        finally:
+            session.close()
+
+    # ================================================================ 状态机
+    def _next_action(self, session: Session) -> str:
+        """纯函数式判定下一步。这是续跑正确性的全部来源。"""
+        if session.log.of_type(EventType.RUN_STOP):
+            return "done"
+        pending = self._pending_calls(session)
+        if pending:
+            return "exec_tools"
+        resp = self._last_response(session)
+        if resp is not None and not (resp.data.get("tool_calls") or []):
+            return "finalize_text"
+        return "call_model"
+
+    def _last_response(self, session: Session) -> Event | None:
+        for ev in reversed(session.events):
+            if ev.type == EventType.MODEL_RESPONSE:
+                return ev
+        return None
+
+    def _pending_calls(self, session: Session) -> list[dict[str, Any]]:
+        """最后一个 assistant 响应里，还没有结果、也没被守卫打回的调用。"""
+        resp = self._last_response(session)
+        if resp is None:
+            return []
+        calls = resp.data.get("tool_calls") or []
+        if not calls:
+            return []
+        after = [e for e in session.events if e.seq > resp.seq]
+        satisfied = {e.data.get("call_id") for e in after
+                     if e.type in (EventType.TOOL_RESULT, EventType.GUARD_DENY)}
+        return [c for c in calls if c.get("id") not in satisfied]
+
+    # ================================================================ 主驱动
+    def _drive(self, session: Session) -> RunResult:
+        cfg = session.config()
+        budget = Budget.from_config(cfg)
+        workspace = Path(cfg.get("workspace") or self.config.workspace)
+        depth = int(cfg.get("depth") or 0)
+        ctx = ToolContext(workspace=workspace, session=session,
+                          approval=self.approval, depth=depth, budget=budget)
+        ctx.spawn = lambda task, args: self._spawn(session, ctx, task)
+
+        if session.log.last is not None and session.log.last.type != EventType.RUN_STOP \
+                and len(session.events) > 2:
+            session.append(EventType.NOTICE, {
+                "level": "info",
+                "text": f"从日志恢复执行（seq={session.log.next_seq}），继续未完成的步骤",
+            })
+
+        while True:
+            action = self._next_action(session)
+
+            if action == "done":
+                return self._result(session)
+
+            if action == "finalize_text":
+                resp = self._last_response(session)
+                session.append(EventType.RUN_STOP, {
+                    "reason": "assistant_text",
+                    "detail": (resp.data.get("text") if resp else "") or "",
+                }, turn=session.log.last_turn)
+                return self._result(session)
+
+            if action == "exec_tools":
+                pending = self._pending_calls(session)
+                session.append(EventType.NOTICE, {
+                    "level": "warn",
+                    "text": f"检测到 {len(pending)} 个中断的工具调用，重新执行（工具应幂等）",
+                }, turn=session.log.last_turn)
+                self._exec_calls(session, pending, ctx, session.log.last_turn)
+                continue
+
+            # ---------------- call_model ----------------
+            stop_reason = self._budget_stop(session, budget)
+            if stop_reason:
+                session.append(EventType.NOTICE, {
+                    "level": "warn", "text": f"预算耗尽（{stop_reason}），停止",
+                }, turn=session.log.last_turn)
+                session.append(EventType.RUN_STOP, {
+                    "reason": stop_reason,
+                    "detail": self._best_effort_answer(session),
+                }, turn=session.log.last_turn)
+                return self._result(session)
+
+            turn = session.log.last_turn + 1
+            session.append(EventType.CONTEXT_SNAPSHOT, {"facts": self._facts(ctx)},
+                           turn=turn)
+
+            # 先剪枝（assemble 内），再摘要（这里）
+            compacted = compact_if_needed(
+                session, budget, policy=self.config.compact_policy,
+                summarize=self._summarizer())
+            if compacted:
+                session.append(EventType.NOTICE, {
+                    "level": "info", "text": "已折叠最早若干轮次为摘要（原始事件保留）",
+                }, turn=turn)
+
+            asm = assemble(session, budget)
+            session.append(EventType.MODEL_REQUEST,
+                           asm.header(provider=self.provider.name,
+                                      model=getattr(self.provider, "model", "n/a"),
+                                      tool_names=self.registry.names()), turn=turn)
+
+            try:
+                resp = self.provider.complete(asm.messages, self.registry.specs(),
+                                              temperature=self.config.temperature)
+            except SimulatedCrash:
+                raise
+            except LLMError as exc:
+                session.append(EventType.ERROR, {"where": "model", "message": str(exc)},
+                               turn=turn)
+                session.append(EventType.RUN_STOP, {
+                    "reason": "llm_error", "detail": self._best_effort_answer(session),
+                }, turn=turn)
+                return self._result(session)
+
+            session.append(EventType.MODEL_RESPONSE, resp.as_event_data(), turn=turn)
+
+            if not resp.tool_calls:
+                session.append(EventType.RUN_STOP, {
+                    "reason": "assistant_text", "detail": resp.text or "",
+                }, turn=turn)
+                return self._result(session)
+
+            self._exec_calls(session, resp.as_event_data()["tool_calls"], ctx, turn)
+
+    # ================================================================ 工具执行
+    def _exec_calls(self, session: Session, calls: list[dict[str, Any]],
+                    ctx: ToolContext, turn: int) -> None:
+        turn_closed = False
+        for raw in calls:
+            if turn_closed:
+                # 必须补齐 tool 消息，否则下一次请求不符合协议
+                session.append(EventType.TOOL_CALL, {
+                    "call_id": raw.get("id"), "name": raw.get("name"),
+                    "args": {}, "skipped": True,
+                }, turn=turn)
+                session.append(EventType.TOOL_RESULT, {
+                    "call_id": raw.get("id"), "ok": False,
+                    "content": "本轮已因守卫拒绝提前结束，该调用未执行。请重新规划。",
+                    "artifact": None, "truncated": False,
+                }, turn=turn)
+                continue
+
+            call = ToolCall.parse({
+                "id": raw.get("id"),
+                "function": {"name": raw.get("name"),
+                             "arguments": raw.get("args") or "{}"},
+            })
+            session.append(EventType.TOOL_CALL,
+                           {"call_id": call.id, "name": call.name, "args": call.args},
+                           turn=turn)
+
+            outcome = self.registry.execute(call, ctx,
+                                            preview_chars=self.config.preview_chars)
+
+            if outcome.denied_by:
+                session.append(EventType.GUARD_DENY, {
+                    "call_id": call.id, "guard": outcome.denied_by,
+                    "reason": outcome.content,
+                }, turn=turn)
+
+            session.append(EventType.TOOL_RESULT, {
+                "call_id": call.id, "ok": outcome.ok, "content": outcome.content,
+                "artifact": outcome.artifact, "truncated": outcome.truncated,
+            }, turn=turn)
+
+            if outcome.terminal:
+                session.append(EventType.RUN_STOP, {
+                    "reason": "finish", "detail": outcome.content,
+                }, turn=turn)
+                return
+
+            if outcome.close_turn:
+                turn_closed = True
+
+    # ================================================================ 上下文
+    def _facts(self, ctx: ToolContext) -> dict[str, str]:
+        stats = ctx.session.stats()
+        facts = {
+            "now": _now(),
+            "workspace": str(ctx.workspace),
+            "turn": f"{stats.turns + 1}/{(ctx.budget.max_turns if ctx.budget else '?')}",
+        }
+        if ctx.depth:
+            facts["role"] = f"subagent(depth={ctx.depth})"
+        return facts
+
+    def _summarizer(self) -> Callable[[str, str], str] | None:
+        """默认不花模型调用做摘要：确定性抽取式，保证可复现。"""
+        return None
+
+    def _budget_stop(self, session: Session, budget: Budget) -> str | None:
+        stats = session.stats()
+        if stats.turns >= budget.max_turns:
+            return "budget_turns"
+        if stats.tool_calls >= budget.max_tool_calls:
+            return "budget_tool_calls"
+        if stats.tokens_in + stats.tokens_out >= budget.max_total_tokens:
+            return "budget_tokens"
+        if deadline_exceeded(session, budget):
+            return "deadline"
+        return None
+
+    def _best_effort_answer(self, session: Session) -> str:
+        for ev in reversed(session.events):
+            if ev.type == EventType.MODEL_RESPONSE and ev.data.get("text"):
+                return ev.data["text"]
+            if ev.type == EventType.TOOL_RESULT and ev.data.get("ok"):
+                pass
+        return "(未产出最终答案)"
+
+    # ================================================================ 子 agent
+    def _spawn(self, parent: Session, ctx: ToolContext, task: str) -> Outcome:
+        cfg = parent.config()
+        max_depth = int(cfg.get("max_subagent_depth") or 0)
+        if ctx.depth >= max_depth:
+            return Outcome(ok=False, content=(
+                f"已达子 agent 深度上限（depth={ctx.depth}, max={max_depth}）。"
+                "请自己完成这个子任务，或把任务拆得更小后串行推进。"))
+
+        sub_id = new_sub_id()
+        parent.append(EventType.SUBAGENT_SPAWN,
+                      {"sub_id": sub_id, "task": wrap_task(task)[:500],
+                       "depth": ctx.depth + 1}, turn=parent.log.last_turn)
+
+        child_dir = child_run_dir(parent.run_dir, sub_id)
+        child_config = HarnessConfig(
+            workspace=ctx.workspace,
+            runs_root=child_dir.parent,
+            system=SUBAGENT_SYSTEM,
+            budget=child_budget(Budget.from_config(cfg)),
+            temperature=self.config.temperature,
+            allow_bash=self.config.allow_bash,
+            max_subagent_depth=max_depth,   # 子树深度不变，靠判定拦住
+            preview_chars=self.config.preview_chars,
+            compact_policy=self.config.compact_policy,
+        )
+        provider = self._provider_factory() if self._provider_factory else self.provider
+        child = Harness(provider=provider, config=child_config,
+                        registry=self.registry, approval=self.approval,
+                        provider_factory=self._provider_factory)
+        started = time.monotonic()
+        try:
+            res = child.run(wrap_task(task, parent_task=parent.task()),
+                            run_id=sub_id, run_dir=child_dir)
+            answer = res.answer or "(子 agent 未返回结论)"
+            ok = res.ok
+        except SimulatedCrash:
+            raise
+        except Exception as exc:
+            answer = f"子 agent 异常: {type(exc).__name__}: {exc}"
+            ok = False
+            res = None
+
+        elapsed = time.monotonic() - started
+        parent.append(EventType.SUBAGENT_RESULT, {
+            "sub_id": sub_id, "ok": ok, "result": answer,
+            "turns": res.stats.turns if res else 0,
+            "elapsed_s": round(elapsed, 2),
+        }, turn=parent.log.last_turn)
+
+        header = (f"[子 agent {sub_id} 完成，{res.stats.turns if res else 0} 轮, "
+                  f"{elapsed:.1f}s]")
+        return Outcome(ok=ok, content=f"{header}\n{answer}")
+
+    # ================================================================ 结果
+    def _result(self, session: Session) -> RunResult:
+        stop = session.log.of_type(EventType.RUN_STOP)
+        reason = stop[-1].data.get("reason") if stop else "unknown"
+        answer = stop[-1].data.get("detail") if stop else None
+        return RunResult(
+            run_id=session.run_dir.name,
+            run_dir=session.run_dir,
+            reason=reason,
+            answer=answer,
+            stats=session.stats(),
+            messages=session.messages(),
+        )
