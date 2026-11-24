@@ -78,6 +78,7 @@ agent/
   subagent.py  SUBAGENT_SYSTEM + 子预算 + 子运行目录
   cli.py       run / resume / replay
 tests/test_core.py   25 个测试，覆盖全部五条不变量
+tests/test_regressions.py  10 个回归测试：续跑消息协议、参数编码、非法 JSON 参数、审批默认拒绝
 examples/demo.py     端到端演示
 ```
 
@@ -103,6 +104,8 @@ def _next_action(self, session) -> str:
 
 因为判定只看日志，所以"续跑"和"没崩过"走的是同一段代码路径。测试里 `test_resume_equals_clean_run` 直接断言两者最终答案与工具序列完全一致。
 
+续跑会往日志里追加「从日志恢复执行」这类提示。API 要求带 `tool_calls` 的 assistant 消息后面紧跟全部 tool 结果，所以 `derive_messages` 会把落在两者之间的提示延后到这一轮结果补齐之后再投影。`test_regressions.py` 用一个按 OpenAI 消息规则校验请求的假模型守着这一点。
+
 ### 2. 工具流水线的失败分层
 
 ```python
@@ -111,7 +114,7 @@ outcome = registry.execute(call, ctx)
 
 | 失败类型 | 处理 | 是否关轮次 |
 |---|---|---|
-| 参数校验失败 | 普通错误结果回灌，模型自己修 | ❌ |
+| 参数校验失败（含非法 JSON 参数） | 普通错误结果回灌，模型自己修 | ❌ |
 | **guard 拒绝** | **单调生效，第一个 deny 就是终局** | ✅ |
 | 工具执行异常 | 普通错误结果回灌，可换路重试 | ❌ |
 | 沙箱越界 | 关轮次 | ✅ |
@@ -223,7 +226,7 @@ class MyProvider:
 ## 测试覆盖
 
 ```
-Ran 25 tests in 0.027s
+Ran 35 tests in 0.047s
 OK
 ```
 
@@ -241,6 +244,10 @@ OK
 | `test_dangerous_commands_denied` | `rm -rf /`、`curl\|sh`、fork bomb 等被拒 |
 | `test_compaction_keeps_system_and_pointers` | 摘要不覆盖 system，保留 originals + artifacts 指针 |
 | `test_truncates_corrupt_tail` | 崩溃留下的半行被截断且留 notice，之后仍能继续写 |
+| `test_crash_between_two_tool_calls` | 崩在两个工具调用之间，续跑后的请求仍符合消息协议 |
+| `test_arguments_are_replayed_verbatim` | 回放给模型的工具参数就是模型原样产出的 JSON |
+| `test_resume_is_not_stuck_on_invalid_json` | 模型给出非法 JSON 参数时错误回灌，续跑不会卡死 |
+| `test_default_gate_denies_write_edit_and_bash` | 没配置审批回调时，写文件、编辑文件、bash 全部被拒 |
 
 ---
 
@@ -252,7 +259,7 @@ OK
 2. **token 是估算**，不是 tiktoken。口径写在 `context.estimate_tokens`，计费要按 provider 返回值算。
 3. **摘要会渐进损失细节**。滚动合并时旧摘要会被截断，久远轮次的细粒度信息只存在 artifacts 和原始日志里。
 4. **默认不并发**。`spawn_subagent` 是串行的；要并行得改 `_spawn`，注意同时写父日志需要加锁。
-5. **审批门默认 fail closed**。没有配置回调时，所有需审批操作一律拒绝——这是安全的默认，但要记得配。
+5. **审批门默认 fail closed**。写文件、编辑文件、bash 每次都要过审批门；没有配置回调时一律拒绝——这是安全的默认，但要记得配。CLI 交互模式逐条询问；`--yes` 或代码里的 `ApprovalGate.allow_all()` 才会全部放行。
 
 ## 下一步可以做的
 

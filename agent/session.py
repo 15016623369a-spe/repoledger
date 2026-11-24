@@ -29,14 +29,45 @@ def _shadowed_seqs(events: list[Event]) -> set[int]:
     return shadowed
 
 
+def _tool_call_arguments(args: Any) -> str:
+    """把日志里的工具参数还原成 API 要求的 arguments 字符串。
+
+    MODEL_RESPONSE 里存的是模型原样产出的 JSON 字符串：合法就原样回放（不能再
+    json.dumps 一次，否则模型看到的是二次编码的字符串）；非法或不是对象时用 "{}"
+    占位，错误原因和原始参数已经写在对应的 tool 结果里。
+    """
+    if isinstance(args, str):
+        if not args.strip():
+            return "{}"
+        try:
+            parsed = json.loads(args)
+        except json.JSONDecodeError:
+            return "{}"
+        return args if isinstance(parsed, dict) else "{}"
+    return json.dumps(args or {}, ensure_ascii=False)
+
+
 def derive_messages(events: list[Event]) -> list[dict[str, Any]]:
     """把事件日志投影成 LLM 消息序列。纯函数：同样输入永远同样输出。
 
     系统提示词是 run/start 里的一个节点，不是独立参数（§3.2）；
     易变事实一律走 context/snapshot 追加，绝不回写 system（§3.3）。
+
+    协议约束：带 tool_calls 的 assistant 消息后面必须紧跟它的全部 tool 消息。
+    续跑时插入的 notice 等非 tool 消息如果落在两者之间，会延后到这一轮的
+    tool 结果补齐之后再投影，否则真实 API 会直接拒绝请求。
     """
     shadowed = _shadowed_seqs(events)
     messages: list[dict[str, Any]] = []
+    open_calls: set[str] = set()          # 最近一条 assistant 发出、还没有结果的 call_id
+    deferred: list[dict[str, Any]] = []   # 这期间出现的非 tool 消息
+
+    def emit(msg: dict[str, Any]) -> None:
+        (deferred if open_calls else messages).append(msg)
+
+    def flush() -> None:
+        messages.extend(deferred)
+        deferred.clear()
 
     for ev in events:
         if ev.seq in shadowed:
@@ -45,20 +76,23 @@ def derive_messages(events: list[Event]) -> list[dict[str, Any]]:
         if ev.type == EventType.RUN_START:
             system = ev.data.get("system") or ""
             if system:
-                messages.append({"role": "system", "content": system})
+                emit({"role": "system", "content": system})
 
         elif ev.type == EventType.USER_INPUT:
-            messages.append({"role": "user", "content": ev.data.get("text", "")})
+            emit({"role": "user", "content": ev.data.get("text", "")})
 
         elif ev.type == EventType.CONTEXT_SNAPSHOT:
             facts = ev.data.get("facts") or {}
             body = "\n".join(f"- {k}: {v}" for k, v in facts.items())
-            messages.append({
+            emit({
                 "role": "user",
                 "content": f"{SNAPSHOT_PREFIX} 本轮生效的事实快照（来源: seq={ev.seq}）\n{body}",
             })
 
         elif ev.type == EventType.MODEL_RESPONSE:
+            # 上一轮的调用如果始终没补齐结果，日志本身就不完整；尽力保持顺序
+            open_calls.clear()
+            flush()
             text = ev.data.get("text") or ""
             calls = ev.data.get("tool_calls") or []
             msg: dict[str, Any] = {"role": "assistant", "content": text or None}
@@ -68,10 +102,11 @@ def derive_messages(events: list[Event]) -> list[dict[str, Any]]:
                         "id": c["id"],
                         "type": "function",
                         "function": {"name": c["name"],
-                                     "arguments": json.dumps(c.get("args") or {}, ensure_ascii=False)},
+                                     "arguments": _tool_call_arguments(c.get("args"))},
                     }
                     for c in calls
                 ]
+                open_calls.update(c["id"] for c in calls)
             messages.append(msg)
 
         elif ev.type == EventType.TOOL_RESULT:
@@ -79,15 +114,20 @@ def derive_messages(events: list[Event]) -> list[dict[str, Any]]:
             if ev.data.get("truncated"):
                 content += (f"\n[truncated: 完整结果见 {ev.data.get('artifact')} "
                             f"(seq={ev.seq})]")
+            call_id = ev.data.get("call_id", "")
             messages.append({
                 "role": "tool",
-                "tool_call_id": ev.data.get("call_id", ""),
+                "tool_call_id": call_id,
                 "content": content or "(empty)",
             })
+            if call_id in open_calls:
+                open_calls.discard(call_id)
+                if not open_calls:
+                    flush()
 
         elif ev.type == EventType.COMPACT_SUMMARY:
             covers = ev.data.get("covers") or [0, 0]
-            messages.append({
+            emit({
                 "role": "user",
                 "content": (f"{SUMMARY_PREFIX} 以下是 seq {covers[0]}..{covers[1]} 的折叠摘要，"
                             f"原始事件仍在日志中可查：\n{ev.data.get('text', '')}"),
@@ -95,9 +135,10 @@ def derive_messages(events: list[Event]) -> list[dict[str, Any]]:
 
         elif ev.type == EventType.NOTICE:
             # 不占用 system 前缀，保证 KV cache 前缀稳定
-            messages.append({"role": "user",
-                             "content": f"{NOTICE_PREFIX} {ev.data.get('text', '')}"})
+            emit({"role": "user",
+                  "content": f"{NOTICE_PREFIX} {ev.data.get('text', '')}"})
 
+    flush()
     return messages
 
 

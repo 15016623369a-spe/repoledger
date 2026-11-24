@@ -244,12 +244,16 @@ def tool_list_dir(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
     return _ok("\n".join(rows) or "(空目录)")
 
 
+def _approved(ctx: ToolContext, req: ApprovalRequest) -> bool:
+    """需审批的操作一律经过审批门。没有审批门或未获批都算拒绝（fail closed）。"""
+    return ctx.approval is not None and ctx.approval.ask(req)
+
+
 def tool_write_file(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
     path = resolve_within(ctx.root(), args["path"])
     content = args.get("content") or ""
-    if ctx.approval is not None and ctx.approval.enabled:
-        if not ctx.approval.ask(ApprovalRequest("write", str(path), "写文件")):
-            raise FatalToolError(f"写入未获批: {path}")
+    if not _approved(ctx, ApprovalRequest("write", str(path), "写文件")):
+        raise FatalToolError(f"写入未获批: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     existed = path.exists()
     path.write_text(content, encoding="utf-8")
@@ -269,6 +273,8 @@ def tool_edit_file(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
         raise ToolError("未找到要替换的原文（注意缩进与换行必须完全一致）")
     if count > 1 and not args.get("replace_all"):
         raise ToolError(f"原文出现 {count} 次，请提供更长的唯一上下文，或设置 replace_all=true")
+    if not _approved(ctx, ApprovalRequest("write", str(path), "编辑文件")):
+        raise FatalToolError(f"编辑未获批: {path}")
     path.write_text(text.replace(old, new) if args.get("replace_all")
                     else text.replace(old, new, 1), encoding="utf-8")
     return _ok(f"已编辑 {path.relative_to(ctx.root())}（替换 {count if args.get('replace_all') else 1} 处）")
@@ -314,9 +320,8 @@ def tool_bash(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
     verdict: CommandVerdict = check_command(command)
     if verdict.denied:
         raise FatalToolError(f"命令被策略拒绝：{verdict.reason}")
-    if ctx.approval is not None and ctx.approval.enabled:
-        if not ctx.approval.ask(ApprovalRequest("bash", command, "执行 shell 命令")):
-            raise FatalToolError("命令未获批")
+    if not _approved(ctx, ApprovalRequest("bash", command, "执行 shell 命令")):
+        raise FatalToolError("命令未获批")
     started = time.monotonic()
     proc = subprocess.run(
         command, shell=True, cwd=str(ctx.root()), capture_output=True,

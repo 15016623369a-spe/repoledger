@@ -12,14 +12,14 @@ from agent.context import Budget, assemble, estimate_messages_tokens, estimate_t
 from agent.events import EventType
 from agent.llm import LLMResponse, ScriptedProvider, SimulatedCrash, tool_call
 from agent.loop import Harness, HarnessConfig, DEFAULT_SYSTEM
-from agent.sandbox import SandboxViolation, check_command, resolve_within
+from agent.sandbox import ApprovalGate, SandboxViolation, check_command, resolve_within
 from agent.session import Session, derive_messages
 from agent.tools import ToolCall, ToolRegistry, default_registry
 
 
 def make_harness(tmp: Path, provider, *, budget: Budget | None = None,
                  registry: ToolRegistry | None = None, depth: int = 1,
-                 provider_factory=None) -> Harness:
+                 provider_factory=None, approval: ApprovalGate | None = None) -> Harness:
     cfg = HarnessConfig(
         workspace=tmp / "ws",
         runs_root=tmp / "runs",
@@ -28,7 +28,9 @@ def make_harness(tmp: Path, provider, *, budget: Budget | None = None,
         allow_bash=False,
     )
     (tmp / "ws").mkdir(parents=True, exist_ok=True)
+    # 这些测试关注的不是审批，写文件需要显式放行（审批本身见 test_regressions.py）
     return Harness(provider=provider, config=cfg, registry=registry,
+                   approval=approval or ApprovalGate.allow_all(),
                    provider_factory=provider_factory)
 
 

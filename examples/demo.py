@@ -19,6 +19,7 @@ from agent.context import Budget, assemble, estimate_messages_tokens
 from agent.events import EventType
 from agent.llm import LLMResponse, MockProvider, SimulatedCrash, tool_call
 from agent.loop import DEFAULT_SYSTEM, Harness, HarnessConfig
+from agent.sandbox import ApprovalGate
 from agent.session import Session
 
 ROOT = Path(__file__).resolve().parent / "_demo"
@@ -102,7 +103,9 @@ def build(runs: Path, *, crash_at: int | None = None) -> Harness:
         max_subagent_depth=1,
         allow_bash=False,
     )
+    # 演示是非交互的离线流程，写报告需要显式放行（相当于 CLI 的 --yes）
     return Harness(provider=MockProvider(planner, crash_at=crash_at), config=cfg,
+                   approval=ApprovalGate.allow_all(),
                    provider_factory=lambda: MockProvider(planner))
 
 

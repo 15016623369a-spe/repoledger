@@ -35,7 +35,7 @@ def _provider(name: str, model: str | None):
 
 def _approval(args: argparse.Namespace) -> ApprovalGate:
     if args.yes:
-        return ApprovalGate()
+        return ApprovalGate.allow_all()
     if not sys.stdin.isatty():
         print("⚠️  非交互环境且未加 --yes：所有需审批操作将被拒绝", file=sys.stderr)
         return ApprovalGate()

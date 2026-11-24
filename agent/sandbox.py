@@ -77,14 +77,26 @@ ApprovalFn = Callable[[ApprovalRequest], bool]
 
 
 class ApprovalGate:
-    """需要人工确认的操作走这里。默认 fail closed。"""
+    """需要人工确认的操作走这里。默认 fail closed。
+
+    需审批的工具（写文件、编辑文件、bash）每次都必须调用 ask()：
+      · ApprovalGate()            → 一律拒绝（非交互且没加 --yes 时就是它）；
+      · ApprovalGate(fn)          → 交给回调决定；
+      · ApprovalGate.allow_all()  → 显式全部放行（CLI 的 --yes、离线演示）。
+    """
 
     def __init__(self, fn: ApprovalFn | None = None):
         self._fn = fn
         self._audit: list[tuple[ApprovalRequest, bool]] = []
 
+    @classmethod
+    def allow_all(cls) -> "ApprovalGate":
+        """显式放行全部需审批操作。只在用户明确同意（如 --yes）时使用。"""
+        return cls(lambda req: True)
+
     @property
     def enabled(self) -> bool:
+        """是否配置了审批回调。注意：未配置 ≠ 放行，未配置时 ask() 一律拒绝。"""
         return self._fn is not None
 
     def ask(self, req: ApprovalRequest) -> bool:

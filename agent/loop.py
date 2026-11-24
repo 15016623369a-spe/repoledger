@@ -24,7 +24,7 @@ from .session import RunStats, Session
 from .subagent import (SUBAGENT_SYSTEM, child_budget, child_run_dir, new_sub_id,
                        wrap_task)
 from .tools import (DEFAULT_PREVIEW_CHARS, Outcome, ToolCall, ToolContext,
-                    ToolRegistry, default_registry)
+                    ToolError, ToolRegistry, default_registry)
 
 DEFAULT_SYSTEM = """你是一个长任务自动化 agent，通过工具循环推进目标。
 
@@ -270,11 +270,28 @@ class Harness:
                 }, turn=turn)
                 continue
 
-            call = ToolCall.parse({
-                "id": raw.get("id"),
-                "function": {"name": raw.get("name"),
-                             "arguments": raw.get("args") or "{}"},
-            })
+            try:
+                call = ToolCall.parse({
+                    "id": raw.get("id"),
+                    "function": {"name": raw.get("name"),
+                                 "arguments": raw.get("args") or "{}"},
+                })
+            except ToolError as exc:
+                # 非法 JSON 参数和参数校验失败同级：结果回灌，模型自己修，不关轮次。
+                # 不能让异常冒出去，否则 run 中断，续跑时又会撞上同一个调用而卡死。
+                raw_args = str(raw.get("args"))
+                session.append(EventType.TOOL_CALL, {
+                    "call_id": raw.get("id"), "name": raw.get("name"),
+                    "args": {}, "raw_args": raw_args[:2000], "parse_error": True,
+                }, turn=turn)
+                session.append(EventType.TOOL_RESULT, {
+                    "call_id": raw.get("id"), "ok": False,
+                    "content": (f"{exc}。原始参数：{raw_args[:300]}。"
+                                "请改成合法的 JSON 对象后重新调用。"),
+                    "artifact": None, "truncated": False,
+                }, turn=turn)
+                continue
+
             session.append(EventType.TOOL_CALL,
                            {"call_id": call.id, "name": call.name, "args": call.args},
                            turn=turn)
