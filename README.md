@@ -285,3 +285,7 @@ OK
 - 压缩摘要改走小模型（`compact_if_needed(..., summarize=fn)` 已经留好接口）
 - 加一个 `--dry-run` 回放评测模式：给已有 `events.jsonl`，重跑对齐检查
 - 把 `RunStats` 导出成 JSONL 指标，接评测
+
+## 许可证
+
+MIT，见 [LICENSE](LICENSE)。
