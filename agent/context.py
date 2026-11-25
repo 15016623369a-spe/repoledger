@@ -1,6 +1,6 @@
 """上下文装配 + token 计量 + 预算。
 
-§3.2 的落地：请求 = 日志的纯函数。
+核心约束：请求 = 日志的纯函数。
   assemble(session, budget) 只看 events + config，不做任何隐藏状态累加。
 所以两次跑同一个 case，只要日志一致，请求就逐字节一致 —— 可直接 diff。
 """
@@ -15,7 +15,7 @@ from .session import Session, derive_messages
 # ---------------------------------------------------------------- token 计量
 # 不引入 tiktoken：它是"准"，但会带来平台依赖和模型版本耦合。
 # 这里用可解释的近似口径：CJK 1 字≈1 token，其它 4 字符≈1 token。
-# 口径写死在这里，评测时"计费/压力/近似构成"三者可分开算（见 §3.5）。
+# 口径写死在这里，评测时"计费/压力/近似构成"三者可分开算。
 
 def estimate_tokens(text: str | None) -> int:
     if not text:
@@ -76,7 +76,7 @@ def deadline_exceeded(session: Session, budget: Budget) -> bool:
 # ---------------------------------------------------------------- 装配
 COLLAPSE_MARK = "[collapsed: 工具结果已折叠为指针，原始内容见日志 artifacts]"
 
-# 工具结果回灌默认上限（§3.5 第一档：剪枝但保留指针）
+# 工具结果回灌默认上限（第一档：剪枝但保留指针）
 DEFAULT_TOOL_PREVIEW = 4000
 
 

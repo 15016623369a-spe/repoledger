@@ -59,8 +59,8 @@ def _tool_call_arguments(args: Any) -> str:
 def derive_messages(events: list[Event]) -> list[dict[str, Any]]:
     """把事件日志投影成 LLM 消息序列。纯函数：同样输入永远同样输出。
 
-    系统提示词是 run/start 里的一个节点，不是独立参数（§3.2）；
-    易变事实一律走 context/snapshot 追加，绝不回写 system（§3.3）。
+    系统提示词是 run/start 里的一个节点，不是独立参数；
+    易变事实一律走 context/snapshot 追加，绝不回写 system。
 
     协议约束：带 tool_calls 的 assistant 消息后面必须紧跟它的全部 tool 消息。
     续跑时插入的 notice 等非 tool 消息如果落在两者之间，会延后到这一轮的

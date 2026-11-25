@@ -1,14 +1,14 @@
 # agent-core
 
+[![CI](https://github.com/15016623369a-spe/simple-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/15016623369a-spe/simple-agent/actions/workflows/ci.yml)
+
 一个**零第三方依赖**（纯标准库，Python 3.10+）的可续跑 agent harness。
 
 面向 **长任务自动化 / 研究**：崩溃能续、上下文有界、子任务可隔离扇出。
-按 `DSH架构对V2的可迁移性评估.md` §8 的骨架实现，但目标不是 Text2SQL，是通用长任务。
+设计上借鉴了 DSH 架构的几条不变量（日志是唯一事实源、消息由日志推导、压缩只隐藏不删除），但目标不是 Text2SQL，是通用长任务。
 
-**规模**：核心包 2,081 行 / 代码行 1,699（`loop.py` 346 行、`tools.py` 329 行最大）。
-比评估文档估的"约 400 行"大 3 倍——主要花在三处：沙箱子系统、子 agent 隔离、CLI。
-纯骨架六个模块（events / session / loop / tools / context / compact）去掉注释后是 1,235 行代码。
-如果只想要最小内核，把 `sandbox.py`、`subagent.py`、`cli.py` 删掉就能回到约 1,000 行。
+**规模**：核心包 2,382 行（`wc -l agent/*.py`，含注释和文档字符串），最大的是 `tools.py` 436 行、`loop.py` 435 行。
+骨架六个模块（events / session / loop / tools / context / compact）共 1,671 行，其余是沙箱、子 agent、CLI 和模型接入。
 
 ---
 
@@ -29,7 +29,8 @@
 ## 跑起来
 
 ```bash
-cd agent-core
+git clone https://github.com/15016623369a-spe/simple-agent.git
+cd simple-agent
 
 # 不需要 API key：用确定性 mock 模型跑完整流程
 python examples/demo.py
@@ -218,7 +219,7 @@ class MyProvider:
 
 ---
 
-## 故意不做的（对应评估文档 §4）
+## 故意不做的
 
 | 不做 | 为什么 |
 |---|---|
