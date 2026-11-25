@@ -22,7 +22,7 @@ from .llm import LLMError, Provider, SimulatedCrash
 from .sandbox import ApprovalGate
 from .session import RunStats, Session
 from .subagent import (SUBAGENT_SYSTEM, child_budget, child_run_dir, new_sub_id,
-                       wrap_task)
+                       sub_id_for_call, wrap_task)
 from .tools import (DEFAULT_PREVIEW_CHARS, Outcome, ToolCall, ToolContext,
                     ToolError, ToolRegistry, default_registry)
 
@@ -191,11 +191,13 @@ class Harness:
 
             if action == "exec_tools":
                 pending = self._pending_calls(session)
+                origin = self._last_response(session)
                 session.append(EventType.NOTICE, {
                     "level": "warn",
                     "text": f"检测到 {len(pending)} 个中断的工具调用，重新执行（工具应幂等）",
                 }, turn=session.log.last_turn)
-                self._exec_calls(session, pending, ctx, session.log.last_turn)
+                self._exec_calls(session, pending, ctx, session.log.last_turn,
+                                 response_seq=origin.seq if origin else -1)
                 continue
 
             # ---------------- call_model ----------------
@@ -235,14 +237,13 @@ class Harness:
             except SimulatedCrash:
                 raise
             except LLMError as exc:
-                session.append(EventType.ERROR, {"where": "model", "message": str(exc)},
-                               turn=turn)
-                session.append(EventType.RUN_STOP, {
-                    "reason": "llm_error", "detail": self._best_effort_answer(session),
-                }, turn=turn)
-                return self._result(session)
+                # 重试用完只说明"现在调不通"（断网、限流、key 失效），不代表任务结束。
+                # 不写 run/stop：日志尾部停在 model/request，resume 会从这里重新请求。
+                session.append(EventType.ERROR, {"where": "model", "message": str(exc),
+                                                 "resumable": True}, turn=turn)
+                return self._result(session, interrupted="llm_error")
 
-            session.append(EventType.MODEL_RESPONSE, resp.as_event_data(), turn=turn)
+            origin = session.append(EventType.MODEL_RESPONSE, resp.as_event_data(), turn=turn)
 
             if not resp.tool_calls:
                 session.append(EventType.RUN_STOP, {
@@ -250,11 +251,12 @@ class Harness:
                 }, turn=turn)
                 return self._result(session)
 
-            self._exec_calls(session, resp.as_event_data()["tool_calls"], ctx, turn)
+            self._exec_calls(session, resp.as_event_data()["tool_calls"], ctx, turn,
+                             response_seq=origin.seq)
 
     # ================================================================ 工具执行
     def _exec_calls(self, session: Session, calls: list[dict[str, Any]],
-                    ctx: ToolContext, turn: int) -> None:
+                    ctx: ToolContext, turn: int, *, response_seq: int) -> None:
         turn_closed = False
         for raw in calls:
             if turn_closed:
@@ -296,6 +298,8 @@ class Harness:
                            {"call_id": call.id, "name": call.name, "args": call.args},
                            turn=turn)
 
+            # 「哪条模型响应里的哪个调用」：续跑时不变，子 agent 用它找回自己的日志
+            ctx.call_key = f"{response_seq}-{call.id}"
             outcome = self.registry.execute(call, ctx,
                                             preview_chars=self.config.preview_chars)
 
@@ -364,12 +368,15 @@ class Harness:
                 f"已达子 agent 深度上限（depth={ctx.depth}, max={max_depth}）。"
                 "请自己完成这个子任务，或把任务拆得更小后串行推进。"))
 
-        sub_id = new_sub_id()
+        # id 由触发它的调用决定：父 run 续跑时重新执行同一个调用，会接上原来的子日志
+        # 继续跑（子 agent 已经跑完就直接取回结论），而不是开新目录从头再来。
+        sub_id = sub_id_for_call(ctx.call_key) if ctx.call_key else new_sub_id()
+        child_dir = child_run_dir(parent.run_dir, sub_id)
+        resumed = (child_dir / "events.jsonl").exists()
         parent.append(EventType.SUBAGENT_SPAWN,
                       {"sub_id": sub_id, "task": wrap_task(task)[:500],
-                       "depth": ctx.depth + 1}, turn=parent.log.last_turn)
-
-        child_dir = child_run_dir(parent.run_dir, sub_id)
+                       "depth": ctx.depth + 1, "resumed": resumed},
+                      turn=parent.log.last_turn)
         child_config = HarnessConfig(
             workspace=ctx.workspace,
             runs_root=child_dir.parent,
@@ -410,10 +417,14 @@ class Harness:
         return Outcome(ok=ok, content=f"{header}\n{answer}")
 
     # ================================================================ 结果
-    def _result(self, session: Session) -> RunResult:
+    def _result(self, session: Session, *, interrupted: str | None = None) -> RunResult:
+        """interrupted 非空表示 run 暂停在可续跑的位置（没有 run/stop）。"""
         stop = session.log.of_type(EventType.RUN_STOP)
-        reason = stop[-1].data.get("reason") if stop else "unknown"
-        answer = stop[-1].data.get("detail") if stop else None
+        if interrupted:
+            reason, answer = interrupted, self._best_effort_answer(session)
+        else:
+            reason = stop[-1].data.get("reason") if stop else "unknown"
+            answer = stop[-1].data.get("detail") if stop else None
         return RunResult(
             run_id=session.run_dir.name,
             run_dir=session.run_dir,

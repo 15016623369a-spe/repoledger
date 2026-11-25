@@ -71,10 +71,18 @@ class Event:
                    type=d["type"], data=d.get("data") or {}, v=d.get("v", SCHEMA_VERSION))
 
 
+class EventLogCorrupted(Exception):
+    """日志中间（不是尾部）出现坏行。这不是崩溃能造成的，拒绝自动修复。"""
+
+
 class EventLog:
     """追加写入的事件日志。每次 append 后 flush + fsync，保证崩溃后可续。
 
-    日志损坏的处理原则：**截断到最后一个完整行**并记一条 notice，绝不静默丢数据。
+    日志损坏的处理原则：
+      · 尾部坏行（崩溃时只写了半行）：把文件**物理截断**到最后一个完整事件，
+        被截掉的字节原样存进 events.jsonl.corrupt，并记一条 notice；
+      · 中间坏行：不是崩溃能造成的，直接报错，交给人处理，绝不静默丢数据。
+    只在内存里跳过坏行是不够的：新事件会接在半行后面，下次加载时一起丢失。
     """
 
     def __init__(self, path: Path, *, fsync: bool = True):
@@ -84,6 +92,8 @@ class EventLog:
         self._lock = threading.Lock()
         self._events: list[Event] = []
         self._corrupt_lines = 0
+        self._discarded_bytes = 0
+        self.backup_path = self.path.with_name(self.path.name + ".corrupt")
         self._load()
         self._fh = open(self.path, "a", encoding="utf-8")
 
@@ -91,21 +101,52 @@ class EventLog:
     def _load(self) -> None:
         if not self.path.exists():
             return
-        with open(self.path, "r", encoding="utf-8") as fh:
-            for lineno, line in enumerate(fh, 1):
-                line = line.rstrip("\n")
-                if not line:
-                    continue
+        data = self.path.read_bytes()
+        pos = 0            # 当前行起点
+        good_end = 0       # 最后一个完整事件之后的字节位置
+        lineno = 0
+        missing_newline = False
+        bad_line = 0
+        while pos < len(data):
+            nl = data.find(b"\n", pos)
+            end = len(data) if nl == -1 else nl + 1
+            raw = data[pos:end].rstrip(b"\r\n")
+            lineno += 1
+            if raw.strip():
                 try:
-                    ev = Event.from_dict(json.loads(line))
-                except (json.JSONDecodeError, KeyError) as exc:
-                    # 崩溃可能写下半行；严格按"截断到最后完整行"处理
-                    self._corrupt_lines = lineno
+                    ev = Event.from_dict(json.loads(raw.decode("utf-8")))
+                except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError):
+                    bad_line = lineno
                     break
                 if ev.seq != len(self._events):
-                    self._corrupt_lines = lineno
+                    bad_line = lineno
                     break
                 self._events.append(ev)
+                missing_newline = nl == -1   # 完整事件但换行没写进去
+            pos = end
+            good_end = end
+
+        if bad_line:
+            rest = data[pos:]
+            if rest.count(b"\n") > 1 or (rest.count(b"\n") == 1 and not rest.endswith(b"\n")):
+                raise EventLogCorrupted(
+                    f"{self.path} 第 {bad_line} 行损坏，且后面还有内容。"
+                    "这不是进程崩溃能造成的（崩溃只会留下最后半行），请人工检查后再续跑。")
+            self._corrupt_lines = bad_line
+            self._discarded_bytes = len(data) - good_end
+            with open(self.backup_path, "ab") as bak:
+                bak.write(data[good_end:])
+                if not data.endswith(b"\n"):
+                    bak.write(b"\n")
+            with open(self.path, "r+b") as fh:
+                fh.truncate(good_end)
+                fh.flush()
+                os.fsync(fh.fileno())
+        elif missing_newline:
+            with open(self.path, "ab") as fh:
+                fh.write(b"\n")
+                fh.flush()
+                os.fsync(fh.fileno())
 
     @property
     def events(self) -> list[Event]:

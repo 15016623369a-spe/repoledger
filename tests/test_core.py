@@ -10,7 +10,8 @@ from pathlib import Path
 from agent.compact import CompactPolicy, compact_if_needed
 from agent.context import Budget, assemble, estimate_messages_tokens, estimate_tokens
 from agent.events import EventType
-from agent.llm import LLMResponse, ScriptedProvider, SimulatedCrash, tool_call
+from agent.llm import (LLMResponse, ProtocolCheckingProvider, ScriptedProvider,
+                       SimulatedCrash, tool_call)
 from agent.loop import Harness, HarnessConfig, DEFAULT_SYSTEM
 from agent.sandbox import ApprovalGate, SandboxViolation, check_command, resolve_within
 from agent.session import Session, derive_messages
@@ -28,10 +29,13 @@ def make_harness(tmp: Path, provider, *, budget: Budget | None = None,
         allow_bash=False,
     )
     (tmp / "ws").mkdir(parents=True, exist_ok=True)
+    # 每次请求都先过消息协议校验：拼错消息会直接抛 ProtocolError，而不是被假模型默默接受
+    checked_factory = ((lambda: ProtocolCheckingProvider(provider_factory()))
+                       if provider_factory else None)
     # 这些测试关注的不是审批，写文件需要显式放行（审批本身见 test_regressions.py）
-    return Harness(provider=provider, config=cfg, registry=registry,
+    return Harness(provider=ProtocolCheckingProvider(provider), config=cfg, registry=registry,
                    approval=approval or ApprovalGate.allow_all(),
-                   provider_factory=provider_factory)
+                   provider_factory=checked_factory)
 
 
 class TestDerivePure(unittest.TestCase):

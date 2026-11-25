@@ -42,9 +42,16 @@ class CommandVerdict:
 
 
 # 已知危险模式。这是"负向清单"，不是完备防线——真正的防线是不给它 root 权限。
+_END = r"""["']?(?=\s|$|;|&|\|)"""          # 参数结束：空白、行尾或命令连接符
+_HOME = r"""(?:~|\$HOME|\$\{HOME\})"""
+
 _DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+)+/(?:\s|$)"), "递归删除根目录"),
-    (re.compile(r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+~(?:\s|/|$)"), "递归删除家目录"),
+    (re.compile(r"""\brm\s+(?:-{1,2}[\w-]*\s+)+["']?/\*?""" + _END), "删除根目录"),
+    (re.compile(r"""\brm\s+(?:-{1,2}[\w-]*\s+)+["']?""" + _HOME + r"""/?\*?""" + _END),
+     "删除家目录"),
+    (re.compile(r"""\bcd\s+["']?(?:/|""" + _HOME + r""")/?["']?\s*(?:&&|;)\s*rm\s+(?:-{1,2}[\w-]*\s+)*-[a-zA-Z]*[rR]"""),
+     "切到根目录或家目录后递归删除"),
+    (re.compile(_HOME + r"""/\.(?:ssh|aws|gnupg|kube|docker|config/gh)\b"""), "访问凭据目录"),
     (re.compile(r"\bdd\b[^\n]*\bof=/dev/(sd|nvme|disk)"), "写裸设备"),
     (re.compile(r"\bmkfs(\.\w+)?\b"), "格式化文件系统"),
     (re.compile(r":\s*\(\s*\)\s*\{.*\}\s*;\s*:"), "fork bomb"),
@@ -116,7 +123,10 @@ def is_binary(data: bytes) -> bool:
     return b"\x00" in data[:4096]
 
 
-def safe_read_text(path: Path, max_bytes: int = 2_000_000) -> tuple[str, bool]:
+MAX_READ_BYTES = 2_000_000
+
+
+def safe_read_text(path: Path, max_bytes: int = MAX_READ_BYTES) -> tuple[str, bool]:
     """读文本文件；超限或二进制返回截断标记。"""
     size = path.stat().st_size
     with open(path, "rb") as fh:
@@ -127,9 +137,23 @@ def safe_read_text(path: Path, max_bytes: int = 2_000_000) -> tuple[str, bool]:
     return text, size > max_bytes
 
 
+# bash 子进程能看到的环境变量：白名单，而不是黑名单。
+# 黑名单永远列不全（HARNESS_API_KEY、DEEPSEEK_API_KEY、各种 *_TOKEN……），
+# 模型一句 `env` 或 `echo $XXX_KEY` 就能把密钥读进上下文。
+SHELL_ENV_ALLOW = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "TZ",
+    "LANG", "LANGUAGE",
+})
+SHELL_ENV_ALLOW_PREFIXES = ("LC_",)
+# 确实需要额外变量时（如 VIRTUAL_ENV），用逗号分隔写进这个环境变量显式放行
+EXTRA_ALLOW_VAR = "HARNESS_SHELL_ENV_ALLOW"
+
+
 def shell_env(root: Path) -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "GITHUB_", "OPENAI_"))}
+    extra = {k.strip() for k in os.environ.get(EXTRA_ALLOW_VAR, "").split(",") if k.strip()}
+    allowed = SHELL_ENV_ALLOW | extra
+    env = {k: v for k, v in os.environ.items()
+           if k in allowed or k.startswith(SHELL_ENV_ALLOW_PREFIXES)}
     env["PWD"] = str(root)
     env["HARNESS_WORKSPACE"] = str(root)
-    env.pop("HISTFILE", None)
     return env

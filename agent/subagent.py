@@ -31,6 +31,16 @@ def new_sub_id() -> str:
     return "sub-" + secrets.token_hex(3)
 
 
+def sub_id_for_call(call_key: str) -> str:
+    """由父 run 里「第几条模型响应 + 调用 id」生成子 agent id。
+
+    同一个调用在续跑时会重新执行，必须拿到同一个 id 才能找回原来的子日志。
+    只用调用 id 不够：有的后端会在不同轮次复用 call_0 这样的 id。
+    """
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", call_key)[:48]
+    return f"sub-{safe}"
+
+
 def sanitize(task: str, *, max_len: int = 4000) -> str:
     clean = re.sub(r"\s+", " ", task).strip()
     return clean[:max_len]

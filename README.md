@@ -18,7 +18,7 @@
 
 | # | 不变量 | 落在哪 |
 |---|---|---|
-| 1 | **append-only 事件日志是唯一事实源**，只追加、只 fsync、永不改写 | `events.py` |
+| 1 | **append-only 事件日志是唯一事实源**，只追加、只 fsync、永不改写（唯一例外：崩溃留下的尾部半行会被截掉，原样备份到 `events.jsonl.corrupt`） | `events.py` |
 | 2 | **模型可见的消息 = 日志的纯函数**，重启/续跑/复现逐字节一致 | `session.derive_messages` |
 | 3 | **主循环没有内存态**，每步从日志推导下一步，杀在任意点都能接上 | `loop._next_action` |
 | 4 | **安全边界写在代码结构里**（guard 单调），不写在提示词里 | `tools.execute` / `sandbox.py` |
@@ -67,18 +67,20 @@ python -m agent replay <run_id> --messages  # 看模型当时到底看到了什�
 
 ```
 agent/
-  events.py    EventType 登记 + append-only 写入 + fsync + 损坏尾部截断
+  events.py    EventType 登记 + append-only 写入 + fsync + 尾部半行物理截断并备份（中间坏行直接报错）
   session.py   Session（append / derive_messages / stats）+ 日志→消息的纯函数投影
   context.py   token 计量（CJK 友好）+ Budget + assemble（请求装配与确定性折叠）
   compact.py   第二档压缩：滚动合并摘要，带 covers/originals/artifacts 指针
   tools.py     validate → guards(单调) → dispatch → prune → finalize
   sandbox.py   路径边界（含 symlink 逃逸）+ 危险命令负向清单 + 审批门（fail closed）
-  llm.py       Provider 协议 + OpenAI 兼容（urllib）+ Mock/Scripted + 崩溃注入
+  llm.py       Provider 协议 + OpenAI 兼容（urllib）+ Mock/Scripted + 崩溃注入 + 消息协议校验
   loop.py      turn 状态机 + 预算 + 子 agent 扇出 + 续跑
   subagent.py  SUBAGENT_SYSTEM + 子预算 + 子运行目录
   cli.py       run / resume / replay
-tests/test_core.py   25 个测试，覆盖全部五条不变量
-tests/test_regressions.py  10 个回归测试：续跑消息协议、参数编码、非法 JSON 参数、审批默认拒绝
+tests/test_core.py   25 个测试，覆盖全部五条不变量（每次请求都先过消息协议校验）
+tests/test_regressions.py  31 个回归测试：续跑消息协议、参数编码、非法 JSON 参数、审批默认拒绝、
+                           日志截断、模型报错可续跑、子 agent 续跑、bash 环境变量与搜索边界、
+                           摘要位置、edit_file 重放、read_file 超大与二进制文件
 examples/demo.py     端到端演示
 ```
 
@@ -101,6 +103,9 @@ def _next_action(self, session) -> str:
 
 - 崩在**模型调用中** → 日志尾部是 `model/request` 无响应 → 重新发请求。
 - 崩在**工具执行中** → 有 `tool/call` 无 `tool/result` → 重新执行该工具（工具应幂等）。
+- **模型接口调不通**（重试用完）→ 只记 `run/error`，不写 `run/stop`，run 暂停在 `model/request`，排查后 `resume` 接着请求。重试会遵守 429 / 503 返回的 `Retry-After`。
+- 崩在**子 agent 里** → 子 agent 的 id 由「哪条模型响应里的哪个调用」决定，父 run 续跑时重新执行同一个调用，会接上原来的子日志继续跑；子 agent 已经跑完就直接取回结论。
+- 崩溃时**只写了半行日志** → 加载时把半行截掉并备份，之后的写入从干净的行尾开始。
 
 因为判定只看日志，所以"续跑"和"没崩过"走的是同一段代码路径。测试里 `test_resume_equals_clean_run` 直接断言两者最终答案与工具序列完全一致。
 
@@ -155,6 +160,8 @@ assert order == ["g1"]
 
 被折叠的内容虽然模型看不见了，但 `originals` 里的 seq 仍可从 `events.jsonl` 原样读回——**证据链没断**。
 
+摘要事件是在压缩发生时才写进日志的，但它讲的是更早的历史，所以投影时放在它覆盖区间的起点（紧跟 system），后面才是保留下来的最近几轮，时间线不会倒过来。
+
 ---
 
 ## 怎么扩展
@@ -207,6 +214,8 @@ class MyProvider:
         ...  # 返回 LLMResponse(text=..., tool_calls=[...], usage={...})
 ```
 
+调试时可以包一层协议校验：`ProtocolCheckingProvider(MyProvider())`。每次请求前检查「带 tool_calls 的 assistant 后面紧跟全部 tool 结果、arguments 是 JSON 对象」，默认发现问题直接抛 `ProtocolError`；`strict=False` 只记到 `violations`，照常发请求。测试里所有 harness 都套着它。
+
 ---
 
 ## 故意不做的（对应评估文档 §4）
@@ -219,14 +228,14 @@ class MyProvider:
 | 投影缓存 / FTS 索引 | 日志按需读，评测时内存折叠 |
 | 多 agent 协作 | 只做**单向扇出**：子 agent 独立上下文，只回一条结论 |
 
-子 agent 的隔离是刻意设计的三件事：独立 `events.jsonl`、独立预算（父的 1/3 轮次、1/4 token）、只回传 O(1) 的结论。所以父上下文不会被 40 轮子任务污染。
+子 agent 的隔离是刻意设计的三件事：独立 `events.jsonl`、独立预算（父的 1/3 轮次、1/4 token）、只回传 O(1) 的结论。所以父上下文不会被 40 轮子任务污染。子 agent 目录名形如 `subagents/sub-<响应 seq>-<调用 id>`，续跑靠它找回同一个子日志。
 
 ---
 
 ## 测试覆盖
 
 ```
-Ran 35 tests in 0.047s
+Ran 56 tests in 0.072s
 OK
 ```
 
@@ -248,6 +257,13 @@ OK
 | `test_arguments_are_replayed_verbatim` | 回放给模型的工具参数就是模型原样产出的 JSON |
 | `test_resume_is_not_stuck_on_invalid_json` | 模型给出非法 JSON 参数时错误回灌，续跑不会卡死 |
 | `test_default_gate_denies_write_edit_and_bash` | 没配置审批回调时，写文件、编辑文件、bash 全部被拒 |
+| `test_tail_half_line_is_truncated_on_disk` | 截断后写入的事件，下次加载时仍然都在 |
+| `test_llm_error_pauses_run_and_resume_finishes` | 模型接口失败只暂停 run，resume 能接着跑完 |
+| `test_parent_resume_continues_child_log` | 崩在子 agent 里，续跑接上原子日志，已做的工具不重做 |
+| `test_bash_cannot_echo_api_key` | bash 里读不到 `HARNESS_API_KEY` 等密钥 |
+| `test_summary_is_projected_right_after_system` | 压缩后唯一生效的摘要紧跟 system，后续轮次按时间排列 |
+| `test_replaying_edit_whose_new_contains_old` | `foo → foo bar` 重放一次不会变成 `foo bar bar` |
+| `test_oversized_file_result_is_still_pruned` | 超过 2MB 的文件读出来照样裁剪落 artifact |
 
 ---
 
@@ -255,11 +271,12 @@ OK
 
 诚实列一下这套东西的真实短板：
 
-1. **工具必须幂等**。崩在 `write_file` 中间，续跑会重写一次。带副作用的工具（转账、发消息）需要自己做 idempotency key。
+1. **工具必须幂等**。崩在工具执行中间，续跑会重新执行一次：`write_file` 重写同样的内容无害；`edit_file` 会先判断编辑是否已经生效（new_string 已在、old_string 不再单独出现），生效了就不再替换，但删除型编辑（new_string 为空）判断不了；`bash` 不保证幂等。带副作用的工具（转账、发消息）需要自己做 idempotency key。
 2. **token 是估算**，不是 tiktoken。口径写在 `context.estimate_tokens`，计费要按 provider 返回值算。
 3. **摘要会渐进损失细节**。滚动合并时旧摘要会被截断，久远轮次的细粒度信息只存在 artifacts 和原始日志里。
 4. **默认不并发**。`spawn_subagent` 是串行的；要并行得改 `_spawn`，注意同时写父日志需要加锁。
 5. **审批门默认 fail closed**。写文件、编辑文件、bash 每次都要过审批门；没有配置回调时一律拒绝——这是安全的默认，但要记得配。CLI 交互模式逐条询问；`--yes` 或代码里的 `ApprovalGate.allow_all()` 才会全部放行。
+6. **bash 不是沙箱**。工作目录在 workspace，但命令本身能访问整个文件系统；危险命令清单只是负向清单。环境变量按白名单传入（PATH、HOME、LANG 等），API key 不会传给子进程；确实需要的变量写进 `HARNESS_SHELL_ENV_ALLOW`（逗号分隔）。要真正隔离，请在容器里跑。
 
 ## 下一步可以做的
 

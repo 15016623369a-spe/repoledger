@@ -29,6 +29,15 @@ def _shadowed_seqs(events: list[Event]) -> set[int]:
     return shadowed
 
 
+def _summary_message(ev: Event) -> dict[str, Any]:
+    covers = ev.data.get("covers") or [0, 0]
+    return {
+        "role": "user",
+        "content": (f"{SUMMARY_PREFIX} 以下是 seq {covers[0]}..{covers[1]} 的折叠摘要，"
+                    f"原始事件仍在日志中可查：\n{ev.data.get('text', '')}"),
+    }
+
+
 def _tool_call_arguments(args: Any) -> str:
     """把日志里的工具参数还原成 API 要求的 arguments 字符串。
 
@@ -69,8 +78,20 @@ def derive_messages(events: list[Event]) -> list[dict[str, Any]]:
         messages.extend(deferred)
         deferred.clear()
 
+    # 仍生效的摘要投影到它覆盖区间的起点，而不是它自己写入日志的位置：
+    # 摘要讲的是更早的历史，排在保留下来的最近几轮后面会让时间线倒过来。
+    summary_at: dict[int, Event] = {}
     for ev in events:
-        if ev.seq in shadowed:
+        if ev.type == EventType.COMPACT_SUMMARY and ev.seq not in shadowed:
+            covers = ev.data.get("covers") or []
+            if len(covers) == 2 and int(covers[0]) < ev.seq:
+                summary_at[int(covers[0])] = ev
+    placed = {ev.seq for ev in summary_at.values()}
+
+    for ev in events:
+        if ev.seq in summary_at:
+            emit(_summary_message(summary_at[ev.seq]))
+        if ev.seq in shadowed or ev.seq in placed:
             continue
 
         if ev.type == EventType.RUN_START:
@@ -126,12 +147,8 @@ def derive_messages(events: list[Event]) -> list[dict[str, Any]]:
                     flush()
 
         elif ev.type == EventType.COMPACT_SUMMARY:
-            covers = ev.data.get("covers") or [0, 0]
-            emit({
-                "role": "user",
-                "content": (f"{SUMMARY_PREFIX} 以下是 seq {covers[0]}..{covers[1]} 的折叠摘要，"
-                            f"原始事件仍在日志中可查：\n{ev.data.get('text', '')}"),
-            })
+            # covers 不合法、没能前移的摘要，退回到它自己的位置
+            emit(_summary_message(ev))
 
         elif ev.type == EventType.NOTICE:
             # 不占用 system 前缀，保证 KV cache 前缀稳定
@@ -167,10 +184,12 @@ class Session:
         self.artifacts_dir = self.run_dir / "artifacts"
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.log = EventLog(self.run_dir / "events.jsonl", fsync=fsync)
-        if self.log._corrupt_lines:  # 崩溃留下的半行，按截断处理
+        if self.log._corrupt_lines:  # 崩溃留下的半行，已物理截断并备份
             self.log.append(EventType.NOTICE, {
                 "level": "warn",
-                "text": f"日志末尾检测到不完整记录（第 {self.log._corrupt_lines} 行），已截断至最后完整事件",
+                "text": (f"日志末尾检测到不完整记录（第 {self.log._corrupt_lines} 行，"
+                         f"{self.log._discarded_bytes} 字节），已截断至最后完整事件；"
+                         f"被截掉的内容保存在 {self.log.backup_path.name}"),
             })
 
     # ---------- 写入 ----------

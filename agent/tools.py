@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .context import estimate_tokens
-from .sandbox import (ApprovalRequest, CommandVerdict, SandboxViolation,
-                      check_command, resolve_within, safe_read_text, shell_env)
+from .sandbox import (MAX_READ_BYTES, ApprovalRequest, CommandVerdict, SandboxViolation,
+                      check_command, is_binary, resolve_within, safe_read_text,
+                      shell_env)
 
 # 单个工具结果回灌前的默认上限（字符）。超过就走 artifact + 指针。
 DEFAULT_PREVIEW_CHARS = 6000
@@ -82,6 +83,7 @@ class ToolContext:
     depth: int = 0
     spawn: Callable[[str, dict[str, Any]], "Outcome"] | None = None
     budget: Any = None
+    call_key: str | None = None   # 当前调用的稳定标识「响应 seq-调用 id」，由主循环设置
 
     def root(self) -> Path:
         return Path(self.workspace).resolve()
@@ -219,6 +221,10 @@ def tool_read_file(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
         raise ToolError(f"文件不存在: {args['path']}")
     if path.is_dir():
         raise ToolError(f"{args['path']} 是目录，用 list_dir")
+    with open(path, "rb") as fh:
+        head = fh.read(4096)
+    if is_binary(head):
+        raise ToolError(f"{args['path']} 是二进制文件（{path.stat().st_size} 字节），不能按文本读取")
     text, oversized = safe_read_text(path)
     offset = int(args.get("offset") or 0)
     limit = int(args.get("limit") or 400)
@@ -226,7 +232,13 @@ def tool_read_file(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
     chunk = lines[offset:offset + limit]
     body = "\n".join(f"{offset + i + 1:>5}\t{ln}" for i, ln in enumerate(chunk))
     header = f"{path.name} 共 {len(lines)} 行，显示 {offset + 1}–{offset + len(chunk)}\n"
-    return _ok(header + body, truncated=oversized)
+    if oversized:
+        header = (f"{path.name} 超过 {MAX_READ_BYTES // 1_000_000}MB，只读取了前 "
+                  f"{MAX_READ_BYTES // 1_000_000}MB（{len(lines)} 行），"
+                  f"显示 {offset + 1}–{offset + len(chunk)}\n")
+    # 不设 truncated：这里的"超大"指文件，不是结果已经裁剪过。结果长了照常走
+    # _prune_maybe 落 artifact，否则几万字符会原样灌进上下文。
+    return _ok(header + body)
 
 
 def tool_list_dir(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
@@ -269,6 +281,13 @@ def tool_edit_file(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
     new = args.get("new_string") or ""
     text = path.read_text(encoding="utf-8")
     count = text.count(old)
+    # 幂等：续跑时可能重新执行一次已经生效的编辑。判断依据是「new 已在文件里，且
+    # 除了 new 内部之外不再有单独的 old」。只看 count 不够：new 包含 old 时
+    # （如 foo → foo bar），重放会再替换一次变成 foo bar bar。
+    # 删除型编辑（new 为空）无法从文件内容判断是否做过，不走这条。
+    if new and new != old and new in text and text.replace(new, "\0").count(old) == 0:
+        return _ok(f"{path.relative_to(ctx.root())} 已是目标内容（new_string 已存在，"
+                   "old_string 不再单独出现），未修改")
     if count == 0:
         raise ToolError("未找到要替换的原文（注意缩进与换行必须完全一致）")
     if count > 1 and not args.get("replace_all"):
@@ -286,7 +305,8 @@ def tool_grep(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
         rx = re.compile(pattern)
     except re.error as exc:
         raise ToolError(f"正则非法: {exc}") from None
-    base = resolve_within(ctx.root(), args.get("path") or ".")
+    root = ctx.root()
+    base = resolve_within(root, args.get("path") or ".")
     include = args.get("include")
     hits: list[str] = []
     files = [base] if base.is_file() else [
@@ -295,6 +315,9 @@ def tool_grep(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
     ]
     for p in files:
         if include and not p.match(include):
+            continue
+        # 和 read_file 同一条边界：符号链接指向 workspace 外的文件一律跳过
+        if not p.resolve().is_relative_to(root):
             continue
         try:
             text, _ = safe_read_text(p, max_bytes=400_000)

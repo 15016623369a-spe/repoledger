@@ -62,6 +62,9 @@ def _print_result(res, verbose: bool) -> None:
     print("─" * 68)
     print(res.answer or "(无最终答案)")
     print("═" * 68)
+    if res.reason == "llm_error":
+        print(f"模型调用失败，run 已暂停在可续跑的位置。排查网络 / key 后运行：\n"
+              f"  python -m agent resume {res.run_id}")
 
 
 def cmd_run(args: argparse.Namespace) -> int:
