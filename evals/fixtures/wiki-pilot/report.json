@@ -1,0 +1,382 @@
+{
+  "revision": "6dda36907aa1825c90d090b14fdab0f69fe22879",
+  "finished_at": "2026-11-26T07:30:15.758927+00:00",
+  "requested_model": "deepseek-v4-pro[1M]",
+  "actual_model": "deepseek-v4-pro",
+  "fingerprints": {
+    "wiki_net_cases.py": "c09f5622f62cdd6d0536609436a85cd684b2a6b5e5a780ee16959f6d38ca0835"
+  },
+  "wiki_snapshot": {
+    "pages": {
+      "architecture.md": "06108903d8487c24adc95effebd02c568e93f1c9229ee8767b412099c631da95",
+      "decisions.md": "68382eb36f6f67e2709f66cdb526d5ee3449e674eda1e1746117d94a7a41329a",
+      "dependencies.md": "172f06e28ae052b7ebb4844bed23641f81bf0732e637b3db1f99ccc2680b9069",
+      "modules.md": "d9528ae08336adac07a0f02301b6dec36553fd35f8ded23b0fe15c467afd31d5"
+    }
+  },
+  "summary": {
+    "pairs_completed": 40
+  },
+  "results": [
+    {
+      "id": "W36",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W23",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W07",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W03",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W24",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W35",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": false
+      }
+    },
+    {
+      "id": "W04",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W10",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W21",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W26",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W22",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": false
+      }
+    },
+    {
+      "id": "W16",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W40",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W19",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W02",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": false
+      }
+    },
+    {
+      "id": "W31",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W17",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": false
+      }
+    },
+    {
+      "id": "W05",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W37",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W11",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W09",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W34",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W27",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": false
+      }
+    },
+    {
+      "id": "W15",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W33",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W12",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W25",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W39",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": false
+      }
+    },
+    {
+      "id": "W18",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": false
+      }
+    },
+    {
+      "id": "W28",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": false
+      }
+    },
+    {
+      "id": "W32",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W13",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W20",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W01",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W30",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": false
+      }
+    },
+    {
+      "id": "W08",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W14",
+      "without_wiki": {
+        "passed": false
+      },
+      "with_wiki": {
+        "passed": false
+      }
+    },
+    {
+      "id": "W29",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W06",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    },
+    {
+      "id": "W38",
+      "without_wiki": {
+        "passed": true
+      },
+      "with_wiki": {
+        "passed": true
+      }
+    }
+  ]
+}

@@ -17,6 +17,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 SCHEMA_VERSION = 1
 
 
@@ -30,6 +35,8 @@ class EventType:
     MODEL_RESPONSE = "model/response"    # data: text, tool_calls[], usage
     TOOL_CALL = "tool/call"              # data: call_id, name, args
     TOOL_RESULT = "tool/result"          # data: call_id, ok, content, artifact, truncated
+    APPROVAL_REQUEST = "approval/request"   # data: call_key, kind, detail, reason, scope
+    APPROVAL_DECISION = "approval/decision"  # data: request_seq, approved
     GUARD_DENY = "guard/deny"            # data: call_id, guard, reason
     COMPACT_SUMMARY = "compact/summary"  # data: covers[seq_start,seq_end], text, originals[]
     SUBAGENT_SPAWN = "subagent/spawn"    # data: sub_id, task, depth
@@ -41,7 +48,7 @@ class EventType:
     ALL = {
         RUN_START, USER_INPUT, CONTEXT_SNAPSHOT, MODEL_REQUEST, MODEL_RESPONSE,
         TOOL_CALL, TOOL_RESULT, GUARD_DENY, COMPACT_SUMMARY, SUBAGENT_SPAWN,
-        SUBAGENT_RESULT, NOTICE, ERROR, RUN_STOP,
+        SUBAGENT_RESULT, NOTICE, ERROR, RUN_STOP, APPROVAL_REQUEST, APPROVAL_DECISION,
     }
 
 
@@ -75,6 +82,22 @@ class EventLogCorrupted(Exception):
     """日志中间（不是尾部）出现坏行。这不是崩溃能造成的，拒绝自动修复。"""
 
 
+class EventLogBusy(Exception):
+    """同一个 run 已经有另一个写入进程。"""
+
+
+def acquire_writer_lock(fd: int, path: Path) -> None:
+    """持有文件描述符期间独占写入，进程退出后由系统释放。"""
+    try:
+        if os.name == "nt":
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        raise EventLogBusy(f"写入锁正在使用：{path}") from exc
+
+
 class EventLog:
     """追加写入的事件日志。每次 append 后 flush + fsync，保证崩溃后可续。
 
@@ -94,8 +117,18 @@ class EventLog:
         self._corrupt_lines = 0
         self._discarded_bytes = 0
         self.backup_path = self.path.with_name(self.path.name + ".corrupt")
-        self._load()
         self._fh = open(self.path, "a", encoding="utf-8")
+        self._lock_fh = None
+        try:
+            # Windows 的字节锁用独立文件，日志读取和尾部修复仍可从其他句柄进行。
+            if os.name == "nt":
+                self._lock_fh = self.path.with_suffix(".lock").open("ab")
+            lock = self._lock_fh if self._lock_fh is not None else self._fh
+            acquire_writer_lock(lock.fileno(), self.path)
+            self._load()
+        except BaseException:
+            self.close()
+            raise
 
     # ---------- 读取 ----------
     def _load(self) -> None:
@@ -193,8 +226,9 @@ class EventLog:
     def close(self) -> None:
         try:
             self._fh.close()
-        except Exception:
-            pass
+        finally:
+            if self._lock_fh is not None:
+                self._lock_fh.close()
 
     def __enter__(self) -> "EventLog":
         return self

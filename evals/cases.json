@@ -1,0 +1,732 @@
+{
+  "revision": "6dda36907aa1825c90d090b14fdab0f69fe22879",
+  "qa": [
+    {
+      "id": "Q01",
+      "category": "runtime",
+      "question": "恢复一次 run 时，哪一个相对文件是事件的事实来源？每次追加事件默认是否调用 fsync？",
+      "fields": {
+        "log": "相对文件名",
+        "fsync": "布尔值"
+      },
+      "expected": {
+        "log": "events.jsonl",
+        "fsync": true
+      },
+      "evidence": [
+        {
+          "file": "agent/session.py",
+          "needle": "events.jsonl"
+        },
+        {
+          "file": "agent/events.py",
+          "needle": "os.fsync(self._fh.fileno())"
+        }
+      ]
+    },
+    {
+      "id": "Q02",
+      "category": "runtime",
+      "question": "如果日志末尾只有一行被截断的 JSON，恢复前会把残缺数据备份到哪个文件？如果日志中间坏行后还有数据，会自动截断吗？",
+      "fields": {
+        "backup": "相对文件名",
+        "truncate_middle": "布尔值"
+      },
+      "expected": {
+        "backup": "events.jsonl.corrupt",
+        "truncate_middle": false
+      },
+      "evidence": [
+        {
+          "file": "agent/events.py",
+          "needle": "events.jsonl.corrupt"
+        },
+        {
+          "file": "agent/events.py",
+          "needle": "raise EventLogCorrupted"
+        }
+      ]
+    },
+    {
+      "id": "Q03",
+      "category": "runtime",
+      "question": "模型看到的对话由哪个函数从事件投影？如果工具组结果还没齐，夹在中间的用户 notice 会立即进入模型消息吗？",
+      "fields": {
+        "function": "函数名，不含模块名",
+        "immediate": "布尔值"
+      },
+      "expected": {
+        "function": "derive_messages",
+        "immediate": false
+      },
+      "evidence": [
+        {
+          "file": "agent/session.py",
+          "needle": "def derive_messages"
+        },
+        {
+          "file": "agent/session.py",
+          "needle": "deferred if open_calls else messages"
+        }
+      ]
+    },
+    {
+      "id": "Q04",
+      "category": "runtime",
+      "question": "旧轮次压缩时，盖住原事件的事件类型是什么？原事件是否会物理删除？",
+      "fields": {
+        "event": "完整事件类型字符串",
+        "delete_originals": "布尔值"
+      },
+      "expected": {
+        "event": "compact/summary",
+        "delete_originals": false
+      },
+      "evidence": [
+        {
+          "file": "agent/events.py",
+          "needle": "COMPACT_SUMMARY = \"compact/summary\""
+        },
+        {
+          "file": "agent/compact.py",
+          "needle": "originals"
+        }
+      ]
+    },
+    {
+      "id": "Q05",
+      "category": "runtime",
+      "question": "如果一个工具结果超长，模型应该调用哪个只读工具查阅完整落盘内容？该工具默认从事件日志文件读取全文吗？",
+      "fields": {
+        "tool": "工具名",
+        "reads_event_log": "布尔值"
+      },
+      "expected": {
+        "tool": "read_artifact",
+        "reads_event_log": false
+      },
+      "evidence": [
+        {
+          "file": "agent/tools.py",
+          "needle": "def tool_read_artifact"
+        },
+        {
+          "file": "agent/session.py",
+          "needle": "artifacts_dir"
+        }
+      ]
+    },
+    {
+      "id": "Q06",
+      "category": "runtime",
+      "question": "CLI 新建 run 默认最多并行执行几次工具调用？工具规格必须打开哪个布尔属性才会进入并行批次？",
+      "fields": {
+        "workers": "整数",
+        "flag": "属性名"
+      },
+      "expected": {
+        "workers": 4,
+        "flag": "parallel_safe"
+      },
+      "evidence": [
+        {
+          "file": "agent/cli.py",
+          "needle": "\"--max-parallel\""
+        },
+        {
+          "file": "agent/loop.py",
+          "needle": "_parallel_safe"
+        }
+      ]
+    },
+    {
+      "id": "Q07",
+      "category": "runtime",
+      "question": "父 run 中已执行过的工具是否会因正常续跑而一律重放？最后一条模型响应还有待执行工具时，下一步动作名是什么？",
+      "fields": {
+        "replay_all": "布尔值",
+        "action": "_next_action 返回的字符串"
+      },
+      "expected": {
+        "replay_all": false,
+        "action": "exec_tools"
+      },
+      "evidence": [
+        {
+          "file": "agent/loop.py",
+          "needle": "return \"exec_tools\""
+        },
+        {
+          "file": "agent/loop.py",
+          "needle": "def _pending_calls"
+        }
+      ]
+    },
+    {
+      "id": "Q08",
+      "category": "runtime",
+      "question": "如果模型接口失败导致 run 暂停，记下的可恢复错误事件是哪一个？这时会写终止事件吗？",
+      "fields": {
+        "event": "完整事件类型字符串",
+        "stop_appended": "布尔值"
+      },
+      "expected": {
+        "event": "run/error",
+        "stop_appended": false
+      },
+      "evidence": [
+        {
+          "file": "agent/events.py",
+          "needle": "ERROR = \"run/error\""
+        },
+        {
+          "file": "agent/loop.py",
+          "needle": "interrupted=\"llm_error\""
+        }
+      ]
+    },
+    {
+      "id": "Q09",
+      "category": "approval",
+      "question": "异步审批等待和作出决定分别对应哪个事件类型？",
+      "fields": {
+        "request": "完整事件类型字符串",
+        "decision": "完整事件类型字符串"
+      },
+      "expected": {
+        "request": "approval/request",
+        "decision": "approval/decision"
+      },
+      "evidence": [
+        {
+          "file": "agent/events.py",
+          "needle": "APPROVAL_REQUEST = \"approval/request\""
+        },
+        {
+          "file": "agent/events.py",
+          "needle": "APPROVAL_DECISION = \"approval/decision\""
+        }
+      ]
+    },
+    {
+      "id": "Q10",
+      "category": "approval",
+      "question": "遇到已请求但还未决的审批，run 状态字符串是什么？再次 resume 会自动同意它吗？",
+      "fields": {
+        "state": "状态字符串",
+        "auto_approve": "布尔值"
+      },
+      "expected": {
+        "state": "approval_pending",
+        "auto_approve": false
+      },
+      "evidence": [
+        {
+          "file": "agent/loop.py",
+          "needle": "return \"approval_pending\""
+        },
+        {
+          "file": "agent/approval.py",
+          "needle": "def pending"
+        }
+      ]
+    },
+    {
+      "id": "Q11",
+      "category": "approval",
+      "question": "MCP 域名异步审批记录会不会在不同 run间全局共享？其 scope 用什么模板？",
+      "fields": {
+        "global": "布尔值",
+        "scope": "使用花括号占位，填源码中的精确模板"
+      },
+      "expected": {
+        "global": false,
+        "scope": "mcp/{cfg.name}/{host}"
+      },
+      "evidence": [
+        {
+          "file": "agent/mcp.py",
+          "needle": "scope=f\"mcp/{cfg.name}/{host}\""
+        },
+        {
+          "file": "agent/approval.py",
+          "needle": "same_scope"
+        }
+      ]
+    },
+    {
+      "id": "Q12",
+      "category": "approval",
+      "question": "审批 CLI 用哪个请求字段把决定关联到请求事件？同一请求的后续决定会覆盖已经记录的第一个决定吗？",
+      "fields": {
+        "reference_key": "字段名",
+        "overwrite_first": "布尔值"
+      },
+      "expected": {
+        "reference_key": "request_seq",
+        "overwrite_first": false
+      },
+      "evidence": [
+        {
+          "file": "agent/cli.py",
+          "needle": "def _record_decision"
+        },
+        {
+          "file": "agent/approval.py",
+          "needle": "setdefault(seq"
+        }
+      ]
+    },
+    {
+      "id": "Q13",
+      "category": "approval",
+      "question": "没有异步审批并且标准输入不是终端时，CLI 默认准许写入或执行 bash 吗？可显式预先批准的长参数是什么？",
+      "fields": {
+        "allows_actions": "布尔值",
+        "option": "完整长参数"
+      },
+      "expected": {
+        "allows_actions": false,
+        "option": "--yes"
+      },
+      "evidence": [
+        {
+          "file": "agent/cli.py",
+          "needle": "not sys.stdin.isatty()"
+        },
+        {
+          "file": "agent/cli.py",
+          "needle": "add_argument(\"--yes\""
+        }
+      ]
+    },
+    {
+      "id": "Q14",
+      "category": "mcp",
+      "question": "MCP 配置里使用哪个字段列举允许注册的工具？该字段完全缺失时，客户端默认注册多少个工具？",
+      "fields": {
+        "field": "字段名",
+        "tool_count": "整数"
+      },
+      "expected": {
+        "field": "allowedTools",
+        "tool_count": 0
+      },
+      "evidence": [
+        {
+          "file": "agent/mcp.py",
+          "needle": "get(\"allowedTools\")"
+        },
+        {
+          "file": "agent/mcp.py",
+          "needle": "if cfg.allowed_tools is None"
+        }
+      ]
+    },
+    {
+      "id": "Q15",
+      "category": "mcp",
+      "question": "Playwright 这类依赖浏览器状态的工具，新进程恢复后靠工具规格的哪个属性决定能否重放？恢复时状态不安全的调用会执行吗？",
+      "fields": {
+        "attribute": "属性名",
+        "execute_unsafe": "布尔值"
+      },
+      "expected": {
+        "attribute": "replay_safe",
+        "execute_unsafe": false
+      },
+      "evidence": [
+        {
+          "file": "agent/loop.py",
+          "needle": "if resuming and not self._replay_safe"
+        },
+        {
+          "file": "agent/tools.py",
+          "needle": "replay_safe: bool"
+        }
+      ]
+    },
+    {
+      "id": "Q16",
+      "category": "mcp",
+      "question": "stdio MCP 客户端等待请求超时后，会发出哪个 JSON-RPC 通知？",
+      "fields": {
+        "notification": "完整通知名"
+      },
+      "expected": {
+        "notification": "notifications/cancelled"
+      },
+      "evidence": [
+        {
+          "file": "agent/mcp.py",
+          "needle": "self.notify(\"notifications/cancelled\""
+        }
+      ]
+    },
+    {
+      "id": "Q17",
+      "category": "mcp",
+      "question": "项目的 stdio Wiki Server 提供哪些工具？",
+      "fields": {
+        "tools": "字符串数组，按字母序"
+      },
+      "expected": {
+        "tools": [
+          "get_page",
+          "list_pages",
+          "search_wiki"
+        ]
+      },
+      "evidence": [
+        {
+          "file": "agent/wiki_mcp.py",
+          "needle": "TOOLS = ["
+        },
+        {
+          "file": "agent/wiki_mcp.py",
+          "needle": "\"name\": \"get_page\""
+        }
+      ]
+    },
+    {
+      "id": "Q18",
+      "category": "mcp",
+      "question": "Wiki MCP 分页偏移按字符还是行数计算？下一页从响应哪个字段恢复？",
+      "fields": {
+        "offset_unit": "用 lowercase English 单词或等义中文作答",
+        "cursor_field": "字段名"
+      },
+      "expected": {
+        "offset_unit": "characters",
+        "cursor_field": "next_offset"
+      },
+      "evidence": [
+        {
+          "file": "agent/wiki_mcp.py",
+          "needle": "markdown[offset:end]"
+        },
+        {
+          "file": "agent/wiki_mcp.py",
+          "needle": "\"next_offset\": end"
+        }
+      ]
+    },
+    {
+      "id": "Q19",
+      "category": "mcp",
+      "question": "在 MCP 域名守卫已开启时，file:// URL 是否会进入审批？HTTP(S) 域名白名单命中时，本域名守卫还会暂停等待人审吗？",
+      "fields": {
+        "file_approval": "布尔值",
+        "allowlist_pauses": "布尔值"
+      },
+      "expected": {
+        "file_approval": false,
+        "allowlist_pauses": false
+      },
+      "evidence": [
+        {
+          "file": "agent/mcp.py",
+          "needle": "GuardDecision(True, \"url-scheme\""
+        },
+        {
+          "file": "agent/mcp.py",
+          "needle": "_host_allowed(host, cfg.allowed_domains)"
+        }
+      ]
+    },
+    {
+      "id": "Q20",
+      "category": "skills",
+      "question": "Skills 启动时预先加入系统提示的是哪两项元数据？正文通过哪个工具按需读取？",
+      "fields": {
+        "metadata": "英文元数据键名数组，按字母序",
+        "tool": "工具名"
+      },
+      "expected": {
+        "metadata": [
+          "description",
+          "name"
+        ],
+        "tool": "read_skill"
+      },
+      "evidence": [
+        {
+          "file": "agent/skills.py",
+          "needle": "def skill_system"
+        },
+        {
+          "file": "agent/skills.py",
+          "needle": "\"read_skill\","
+        }
+      ]
+    },
+    {
+      "id": "Q21",
+      "category": "skills",
+      "question": "原 run 启用 Skill 目录后又新增一个 Skill，resume 会自动把它添加进本次 run 的目录吗？已有 Skill 的名称或描述变动时，读取是否继续？",
+      "fields": {
+        "add_on_resume": "布尔值",
+        "read_on_metadata_change": "布尔值"
+      },
+      "expected": {
+        "add_on_resume": false,
+        "read_on_metadata_change": false
+      },
+      "evidence": [
+        {
+          "file": "agent/cli.py",
+          "needle": "register_skills(registry, cfg_dict.get(\"skills\"))"
+        },
+        {
+          "file": "agent/skills.py",
+          "needle": "Skill 元数据已变化"
+        }
+      ]
+    },
+    {
+      "id": "Q22",
+      "category": "wiki",
+      "question": "生成的 Wiki 将外部核对来源附在哪个页面文件？一次最多能指定几个不同的外部来源？",
+      "fields": {
+        "page": "Wiki 文件名",
+        "max_sources": "整数"
+      },
+      "expected": {
+        "page": "dependencies.md",
+        "max_sources": 8
+      },
+      "evidence": [
+        {
+          "file": "agent/wiki.py",
+          "needle": "name == \"dependencies.md\""
+        },
+        {
+          "file": "agent/wiki_sources.py",
+          "needle": "MAX_SOURCES = 8"
+        }
+      ]
+    },
+    {
+      "id": "Q23",
+      "category": "wiki",
+      "question": "从已收集的 JSON 导入外部核对资料的 CLI 参数是什么？清单用哪个字段表示带时区的采集时间？",
+      "fields": {
+        "flag": "完整长参数",
+        "timestamp_field": "字段名"
+      },
+      "expected": {
+        "flag": "--web-sources",
+        "timestamp_field": "fetched_at"
+      },
+      "evidence": [
+        {
+          "file": "agent/cli.py",
+          "needle": "\"--web-sources\""
+        },
+        {
+          "file": "agent/wiki_sources.py",
+          "needle": "fetched_at 必须包含时区"
+        }
+      ]
+    },
+    {
+      "id": "Q24",
+      "category": "wiki",
+      "question": "生成 Wiki 时，目标仓库中没有被 Git 跟踪的源文件会自动进入索引吗？记录来源内容用了哪种哈希算法？",
+      "fields": {
+        "untracked_sources_included": "布尔值",
+        "hash": "标准算法名，例如 SHA-xxx"
+      },
+      "expected": {
+        "untracked_sources_included": false,
+        "hash": "SHA-256"
+      },
+      "evidence": [
+        {
+          "file": "agent/wiki.py",
+          "needle": "\"ls-files\", \"--cached\""
+        },
+        {
+          "file": "agent/wiki.py",
+          "needle": "hashlib.sha256"
+        }
+      ]
+    },
+    {
+      "id": "Q25",
+      "category": "wiki",
+      "question": "需要人审的 Wiki 草稿最终写入哪一个项目相对路径？已有手写文件被识别为非托管输出时，程序会覆盖吗？",
+      "fields": {
+        "draft": "相对路径",
+        "overwrite_manual": "布尔值"
+      },
+      "expected": {
+        "draft": "wiki/AGENTS.md",
+        "overwrite_manual": false
+      },
+      "evidence": [
+        {
+          "file": "agent/wiki.py",
+          "needle": "root / \"wiki\" / name"
+        },
+        {
+          "file": "agent/wiki.py",
+          "needle": "已有手写或无法识别的页面"
+        }
+      ]
+    },
+    {
+      "id": "Q26",
+      "category": "wiki",
+      "question": "Wiki 默认的正文生成模式叫什么？生成外部引用后，resume 要再次访问所有网页才能恢复已记录来源吗？",
+      "fields": {
+        "mode": "命令行模式名",
+        "refetch_on_resume": "布尔值"
+      },
+      "expected": {
+        "mode": "offline",
+        "refetch_on_resume": false
+      },
+      "evidence": [
+        {
+          "file": "agent/cli.py",
+          "needle": "default=\"offline\""
+        },
+        {
+          "file": "agent/cli.py",
+          "needle": "cfg_dict[\"wiki\"]"
+        }
+      ]
+    },
+    {
+      "id": "Q27",
+      "category": "usage",
+      "question": "usage 给出 OpenAI 风格的 prompt_tokens_details 时，里面哪个字段是缓存命中的 token 数？接口没返回输入 token 时，是否拿本地估算值填补？",
+      "fields": {
+        "cache_field": "prompt_tokens_details 内的直接键名",
+        "estimate_missing": "布尔值"
+      },
+      "expected": {
+        "cache_field": "cached_tokens",
+        "estimate_missing": false
+      },
+      "evidence": [
+        {
+          "file": "agent/usage.py",
+          "needle": "details.get(\"cached_tokens\")"
+        },
+        {
+          "file": "agent/usage.py",
+          "needle": "u.usage_missing += 1"
+        }
+      ]
+    },
+    {
+      "id": "Q28",
+      "category": "usage",
+      "question": "统计分位数时用哪个公式取排序列表中的一基排名？没有任何样本时返回什么？",
+      "fields": {
+        "rank": "用 no-space 数学记法，概率用 p、样本数用 n，明确下界",
+        "empty": "JSON 值"
+      },
+      "expected": {
+        "rank": "max(1,ceil(p*n))",
+        "empty": null
+      },
+      "evidence": [
+        {
+          "file": "agent/usage.py",
+          "needle": "math.ceil(p * len(ordered))"
+        },
+        {
+          "file": "agent/usage.py",
+          "needle": "return None"
+        }
+      ]
+    },
+    {
+      "id": "Q29",
+      "category": "config",
+      "question": "连接模型的 API 地址配置键叫什么？显式构造参数和终端环境都未提供时，模型配置从哪一个项目文件读取？",
+      "fields": {
+        "base_url": "环境变量名",
+        "file": "项目根目录相对文件名"
+      },
+      "expected": {
+        "base_url": "HARNESS_BASE_URL",
+        "file": ".env"
+      },
+      "evidence": [
+        {
+          "file": "agent/llm.py",
+          "needle": "config.get(\"HARNESS_BASE_URL\")"
+        },
+        {
+          "file": "agent/settings.py",
+          "needle": " / \".env\""
+        }
+      ]
+    },
+    {
+      "id": "Q30",
+      "category": "config",
+      "question": "显式切换模型 API 地址时，在没有显式密钥、也没有进程环境密钥的情况下，客户端会把另一个地址的 .env 密钥带过去吗？pytest 是否是项目运行依赖？",
+      "fields": {
+        "reuse_different_endpoint_key": "布尔值",
+        "runtime_requires_pytest": "布尔值"
+      },
+      "expected": {
+        "reuse_different_endpoint_key": false,
+        "runtime_requires_pytest": false
+      },
+      "evidence": [
+        {
+          "file": "agent/llm.py",
+          "needle": "self.base_url == configured_url"
+        },
+        {
+          "file": "README.md",
+          "needle": "零第三方依赖"
+        }
+      ]
+    }
+  ],
+  "bugfix": [
+    {
+      "id": "B01",
+      "title": "耗时分位数多取了一个样本",
+      "file": "agent/usage.py",
+      "anchor": "    return ordered[rank - 1]",
+      "mutation": "    return ordered[min(rank, len(ordered) - 1)]",
+      "test": "test_week1.TestUsage.test_percentile_nearest_rank",
+      "question": "耗时统计偏高：对 1 到 20 的有序样本，P95 实际取到了最大值。修复 nearest-rank 索引换算，保留空样本返回行为。"
+    },
+    {
+      "id": "B02",
+      "title": "Wiki 分页跨页遗漏一个字符",
+      "file": "agent/wiki_mcp.py",
+      "anchor": "\"next_offset\": end if end < len(markdown) else None,",
+      "mutation": "\"next_offset\": end + 1 if end < len(markdown) else None,",
+      "test": "test_week3.TestWikiMCP.test_real_stdio_tools_and_path_boundary",
+      "question": "读取 Wiki 并严格沿 next_offset 取下一页时，分页拼接会漏字。修复分页指针，保证最后一页仍能通知读者已到末尾。"
+    },
+    {
+      "id": "B03",
+      "title": "重试应遵守服务端等待提示",
+      "file": "agent/llm.py",
+      "anchor": "            return min(max(float(value), 0.0), MAX_RETRY_AFTER_S)",
+      "mutation": "            return 0.0",
+      "test": "test_regressions.TestModelErrorsAreResumable.test_retry_after_header_is_respected",
+      "question": "模型接口在重试响应里返回了数字 Retry-After，客户端却马上重试。修复等待时间选择，同时保留非负值和最大等待时间限制。"
+    },
+    {
+      "id": "B04",
+      "title": "Skills 多行说明在注册时混入 YAML 标记",
+      "file": "agent/skills.py",
+      "anchor": "            parts = parts[1:]",
+      "mutation": "            parts = parts",
+      "test": "test_week3.TestSkills.test_progressive_disclosure_and_resume_catalog",
+      "question": "用 YAML 多行格式写 SKILL.md 的 description 后，系统提示显示了语法标记，匹配原有技能说明的检查失败。修复解析，同时确保启动只披露元数据。"
+    }
+  ]
+}

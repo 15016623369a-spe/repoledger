@@ -13,6 +13,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from .settings import dotenv_values
+
 
 class LLMError(Exception):
     """模型调用失败。loop 会把它记成 ERROR 事件并决定是否重试。"""
@@ -141,7 +143,9 @@ def _backoff_seconds(attempt: int, headers: Any) -> float:
 class OpenAICompatProvider:
     """任何 OpenAI 兼容端点：OpenAI、DeepSeek、Moonshot、vLLM、Ollama、OpenRouter。
 
-    环境变量：
+    配置优先级依次为显式参数、进程环境变量、项目 .env 和默认值。
+
+    配置项：
       HARNESS_BASE_URL  (默认 https://api.openai.com/v1)
       HARNESS_API_KEY
       HARNESS_MODEL     (默认 gpt-4o-mini)
@@ -150,10 +154,13 @@ class OpenAICompatProvider:
     def __init__(self, *, base_url: str | None = None, api_key: str | None = None,
                  model: str | None = None, timeout: float = 180.0,
                  max_retries: int = 3):
-        self.base_url = (base_url or os.environ.get("HARNESS_BASE_URL")
-                         or "https://api.openai.com/v1").rstrip("/")
-        self.api_key = api_key or os.environ.get("HARNESS_API_KEY") or ""
-        self.model = model or os.environ.get("HARNESS_MODEL") or "gpt-4o-mini"
+        config = dotenv_values()
+        configured_url = (config.get("HARNESS_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+        self.base_url = (base_url or os.environ.get("HARNESS_BASE_URL") or configured_url).rstrip("/")
+        # 切换端点时，仅使用显式传入或环境变量中的密钥。
+        file_key = config.get("HARNESS_API_KEY", "") if self.base_url == configured_url else ""
+        self.api_key = api_key or os.environ.get("HARNESS_API_KEY") or file_key
+        self.model = model or os.environ.get("HARNESS_MODEL") or config.get("HARNESS_MODEL") or "gpt-4o-mini"
         self.timeout = timeout
         self.max_retries = max_retries
         self.name = f"openai-compat:{self.model}"

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -197,10 +198,14 @@ class Session:
                turn: int | None = None) -> Event:
         return self.log.append(type_, data, turn=turn)
 
-    def write_artifact(self, seq_hint: int, content: str, suffix: str = "txt") -> str:
-        """把工具完整结果落盘，日志里只存预览 + 指针。"""
-        name = f"{seq_hint:05d}{'-' + suffix if suffix else ''}.txt"
-        path = self.artifacts_dir / f"{seq_hint:05d}.txt"
+    def write_artifact(self, seq_hint: int | str, content: str, suffix: str = "txt") -> str:
+        """把工具完整结果落盘，日志里只存预览 + 指针。
+
+        seq_hint 可以是事件 seq，也可以是调用标识「响应 seq-调用 id」。
+        """
+        stem = (f"{seq_hint:05d}" if isinstance(seq_hint, int)
+                else re.sub(r"[^A-Za-z0-9_.-]", "_", str(seq_hint))[:80])
+        path = self.artifacts_dir / f"{stem}.{suffix or 'txt'}"
         path.write_text(content, encoding="utf-8")
         return str(path.relative_to(self.run_dir))
 

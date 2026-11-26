@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .context import estimate_tokens
+from .approval import ApprovalPaused
 from .sandbox import (MAX_READ_BYTES, ApprovalRequest, CommandVerdict, SandboxViolation,
                       check_command, is_binary, resolve_within, safe_read_text,
                       shell_env)
@@ -81,9 +82,12 @@ class ToolContext:
     session: Any = None
     approval: Any = None
     depth: int = 0
-    spawn: Callable[[str, dict[str, Any]], "Outcome"] | None = None
+    # spawn(ctx, task)：传入的是当前调用自己的上下文，子 agent 用其中的 call_key 定 id
+    spawn: Callable[["ToolContext", str], "Outcome"] | None = None
     budget: Any = None
-    call_key: str | None = None   # 当前调用的稳定标识「响应 seq-调用 id」，由主循环设置
+    # 当前调用的稳定标识「响应 seq-调用 id」。主循环给每个调用复制一份上下文再设置，
+    # 并行执行时各调用互不覆盖。
+    call_key: str | None = None
 
     def root(self) -> Path:
         return Path(self.workspace).resolve()
@@ -99,6 +103,13 @@ class ToolSpec:
     description: str
     parameters: dict[str, Any]
     handler: Handler
+    # 可以和同一轮里其他 parallel_safe 的调用并发执行：没有副作用，且结果不依赖
+    # 其他调用的执行顺序。「只读」不等于可并行：浏览器截取页面快照是只读的，
+    # 但它依赖前一步打开了哪个页面，所以不能和打开页面的调用并发。
+    parallel_safe: bool = False
+    # 进程崩溃后续跑时能否原样重新执行。依赖外部会话状态的工具（浏览器页面）
+    # 在进程重启后状态已经丢失，重放会得到错误的结果。
+    replay_safe: bool = True
 
     def schema(self) -> dict[str, Any]:
         return {"type": "function",
@@ -125,6 +136,9 @@ class ToolRegistry:
 
     def has(self, name: str) -> bool:
         return name in self._tools
+
+    def get(self, name: str) -> ToolSpec | None:
+        return self._tools.get(name)
 
     # ---------- 流水线 ----------
     def execute(self, call: ToolCall, ctx: ToolContext, *,
@@ -163,6 +177,8 @@ class ToolRegistry:
                            close_turn=True, denied_by="policy")
         except ToolError as exc:
             return Outcome(ok=False, content=f"工具报错: {exc}")
+        except ApprovalPaused:
+            raise
         except subprocess.TimeoutExpired:
             return Outcome(ok=False, content="命令超时，已终止")
         except Exception as exc:  # 兜底：任何异常都回灌，不炸掉整个 run
@@ -201,9 +217,12 @@ def _prune_maybe(outcome: Outcome, ctx: ToolContext,
     dropped = len(outcome.content) - HEAD_CHARS - TAIL_CHARS
     artifact = None
     if ctx.session is not None:
-        art = ctx.session.write_artifact(ctx.session.log.next_seq, outcome.content)
+        # 用调用标识命名：同一批并行调用会同时落盘，用 next_seq 命名会互相覆盖
+        art = ctx.session.write_artifact(ctx.call_key or ctx.session.log.next_seq,
+                                         outcome.content)
         artifact = art
-        note = f"\n\n[已截断 {dropped} 字符；完整结果: {art}]"
+        note = (f"\n\n[已截断 {dropped} 字符；完整结果: {art}，"
+                "可用 read_artifact 分段读取，或传 pattern 按正则搜索]")
     else:
         note = f"\n\n[已截断 {dropped} 字符]"
     return Outcome(ok=outcome.ok, content=f"{head}\n\n…（中间 {dropped} 字符省略）…\n\n{tail}{note}",
@@ -316,12 +335,10 @@ def tool_grep(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
     for p in files:
         if include and not p.match(include):
             continue
-        # 和 read_file 同一条边界：符号链接指向 workspace 外的文件一律跳过
-        if not p.resolve().is_relative_to(root):
-            continue
         try:
-            text, _ = safe_read_text(p, max_bytes=400_000)
-        except OSError:
+            target = resolve_within(root, str(p))
+            text, _ = safe_read_text(target, max_bytes=400_000)
+        except (SandboxViolation, OSError):
             continue
         if text.startswith("(二进制"):
             continue
@@ -361,11 +378,37 @@ def tool_bash(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
         ok=False, content=body)
 
 
+def tool_read_artifact(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
+    """读取被截断的大结果。只能读本 run 的 artifacts/，不能借此读工作区外的文件。"""
+    if ctx.session is None:
+        raise ToolError("当前没有运行目录，没有可读的 artifact")
+    run_dir = Path(ctx.session.run_dir).resolve()
+    path = resolve_within(run_dir, args["path"])
+    if not path.is_relative_to(run_dir / "artifacts") or not path.is_file():
+        raise ToolError(f"没有这个 artifact: {args['path']}（路径形如 artifacts/xxx.txt）")
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    pattern = args.get("pattern")
+    if pattern:
+        try:
+            rx = re.compile(pattern)
+        except re.error as exc:
+            raise ToolError(f"正则非法: {exc}") from None
+        hits = [f"{i:>6}\t{ln.strip()[:300]}" for i, ln in enumerate(lines, 1) if rx.search(ln)]
+        shown = hits[:200]
+        more = f"\n…（共 {len(hits)} 处，只显示前 200 处）" if len(hits) > 200 else ""
+        return _ok(f"{args['path']} 共 {len(lines)} 行，匹配 {len(hits)} 处\n" + "\n".join(shown) + more
+                   if hits else f"{args['path']} 共 {len(lines)} 行，没有匹配")
+    offset = max(0, int(args.get("offset") or 0))
+    limit = max(1, int(args.get("limit") or 200))
+    chunk = lines[offset:offset + limit]
+    body = "\n".join(f"{offset + i + 1:>6}\t{ln}" for i, ln in enumerate(chunk))
+    return _ok(f"{args['path']} 共 {len(lines)} 行，显示 {offset + 1}–{offset + len(chunk)}\n{body}")
+
+
 def tool_spawn_subagent(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
     if ctx.spawn is None:
         raise ToolError("子 agent 不可用（当前上下文未提供 spawn 能力）")
-    task = args["task"]
-    return ctx.spawn(task, args)
+    return ctx.spawn(ctx, args["task"])
 
 
 def tool_finish(ctx: ToolContext, args: dict[str, Any]) -> Outcome:
@@ -382,12 +425,12 @@ def default_registry(*, allow_bash: bool = True) -> ToolRegistry:
             "path": {"type": "string", "description": "相对 workspace 的路径"},
             "offset": {"type": "integer", "description": "起始行(0-based)"},
             "limit": {"type": "integer", "description": "最多读多少行"},
-        }, "required": ["path"]}, tool_read_file))
+        }, "required": ["path"]}, tool_read_file, parallel_safe=True))
 
     reg.register(ToolSpec(
         "list_dir", "列出目录内容。",
         {"type": "object", "properties": {
-            "path": {"type": "string"}}, "required": []}, tool_list_dir))
+            "path": {"type": "string"}}, "required": []}, tool_list_dir, parallel_safe=True))
 
     reg.register(ToolSpec(
         "write_file", "写入/覆盖文件（父目录自动创建）。",
@@ -411,7 +454,17 @@ def default_registry(*, allow_bash: bool = True) -> ToolRegistry:
             "pattern": {"type": "string"},
             "path": {"type": "string"},
             "include": {"type": "string", "description": "glob 过滤，如 **/*.py"},
-        }, "required": ["pattern"]}, tool_grep))
+        }, "required": ["pattern"]}, tool_grep, parallel_safe=True))
+
+    reg.register(ToolSpec(
+        "read_artifact", "读取被截断的工具结果全文（路径见截断提示，如 artifacts/12-c1.txt）。"
+        "传 pattern 按正则搜索并返回匹配行和行号；否则按 offset / limit 分段读取。",
+        {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "pattern": {"type": "string", "description": "正则，只返回匹配的行"},
+            "offset": {"type": "integer", "description": "起始行(0-based)"},
+            "limit": {"type": "integer", "description": "最多读多少行，默认 200"},
+        }, "required": ["path"]}, tool_read_artifact, parallel_safe=True))
 
     if allow_bash:
         reg.register(ToolSpec(

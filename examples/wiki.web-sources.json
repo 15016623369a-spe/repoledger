@@ -1,0 +1,14 @@
+[
+  {
+    "url": "https://playwright.dev/docs/browsers",
+    "title": "Playwright 官方文档 · Browsers",
+    "fetched_at": "2026-11-25T16:13:54+00:00",
+    "excerpt": "Playwright 安装的 Chromium headless shell 与稳定版 Chrome 的新无头实现是不同的浏览器运行方式。使用 Playwright 配套二进制时，应按所用 Playwright 版本安装对应的浏览器。"
+  },
+  {
+    "url": "https://github.com/microsoft/playwright/issues/33566",
+    "title": "Playwright Issue #33566 · Chromium headless changes in v1.49",
+    "fetched_at": "2026-11-25T16:14:08+00:00",
+    "excerpt": "维护者记录了 v1.49 的迁移：chrome 和 msedge 渠道切换到新无头实现，Playwright 继续提供独立的 chromium headless shell。此 issue 说明两类实现的差异，无法单独诊断某次浏览器进程退出。"
+  }
+]

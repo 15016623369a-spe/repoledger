@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .settings import is_project_dotenv
+
 
 class SandboxViolation(Exception):
     """越过沙箱边界。属于"策略层失败"，会关掉当前轮次而不是让模型自己改。"""
@@ -28,6 +30,8 @@ def resolve_within(root: Path, user_path: str) -> Path:
         target.relative_to(root)
     except ValueError:
         raise SandboxViolation(f"路径越界：{user_path} 不在 workspace {root} 内") from None
+    if is_project_dotenv(target):
+        raise SandboxViolation("项目 .env 为模型连接配置，工作区文件工具无法访问。")
     return target
 
 
@@ -77,6 +81,7 @@ class ApprovalRequest:
     kind: str          # "bash" | "write" | "network" ...
     detail: str
     reason: str = ""
+    scope: str | None = None  # None 时仅批准当前调用
 
 
 # 返回 True = 批准。没有配置审批回调时按"拒绝"处理（fail closed）。

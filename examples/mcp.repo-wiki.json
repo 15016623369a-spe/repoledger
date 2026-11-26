@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "repo_wiki": {
+      "command": "python3",
+      "args": ["-m", "agent", "wiki-mcp", "."],
+      "allowedTools": ["list_pages", "search_wiki", "get_page"]
+    }
+  }
+}

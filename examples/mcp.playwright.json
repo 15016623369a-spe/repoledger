@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@0.0.85", "--headless", "--isolated", "--image-responses", "omit"],
+      "allowedTools": [
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_navigate_back",
+        "browser_wait_for",
+        "browser_close"
+      ],
+      "stateful": true,
+      "replaySafeTools": ["browser_navigate", "browser_close"],
+      "urlArguments": {"browser_navigate": "url"},
+      "allowedDomains": [
+        "docs.python.org",
+        "fastapi.tiangolo.com",
+        "developer.mozilla.org",
+        "github.com"
+      ],
+      "timeoutSeconds": 90
+    }
+  }
+}

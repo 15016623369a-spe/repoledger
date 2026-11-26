@@ -11,13 +11,15 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agent import cli
 from agent.compact import CompactPolicy, compact_if_needed
 from agent.context import Budget, assemble, estimate_messages_tokens
 from agent.events import EventType
-from agent.llm import LLMResponse, MockProvider, SimulatedCrash, tool_call
+from agent.llm import LLMResponse, MockProvider, ProtocolCheckingProvider, SimulatedCrash, tool_call
 from agent.loop import DEFAULT_SYSTEM, Harness, HarnessConfig
 from agent.sandbox import ApprovalGate
 from agent.session import Session
@@ -189,6 +191,32 @@ def demo_compaction(tmp: Path) -> None:
     s.close()
 
 
+def demo_repo_impact() -> None:
+    def policy(messages, _):
+        evidence = next((message["content"] for message in messages if message["role"] == "tool"), None)
+        if evidence is None:
+            return LLMResponse(tool_calls=[tool_call("impact-search", "grep", path="labs",
+                                                     pattern="不接受 24h|更新延迟 24h")])
+        lines = evidence.splitlines()
+        constraint = next(line for line in lines if line.startswith("labs/notes.md:"))
+        affected = next(line for line in lines if line.startswith("labs/A-vector.md:"))
+        answer = f"方案 A 仍受到更新延迟约束。证据：\n{constraint}\n{affected}"
+        return LLMResponse(tool_calls=[tool_call("impact-finish", "finish", answer=answer)])
+
+    provider = ProtocolCheckingProvider(MockProvider(policy))
+    with patch.object(cli, "_provider", return_value=provider):
+        status = cli.main([
+            "--runs", str(RUNS), "run", "若移除引用约束，方案 A 还受到什么限制？",
+            "--workspace", str(WS), "--run-id", "repo-impact", "--strategy", "repo-impact-v2",
+            "--provider", "mock", "--no-bash",
+        ])
+    if status:
+        raise RuntimeError("变更影响演示运行失败")
+    with Session(RUNS / "repo-impact") as session:
+        print(f"  日志记录的策略：{session.config()['strategy']}")
+    show_trace(RUNS / "repo-impact")
+
+
 def main() -> int:
     prepare_workspace()
     if RUNS.exists():
@@ -250,6 +278,11 @@ def main() -> int:
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         demo_compaction(Path(d))
+
+    print("\n" + "═" * 76)
+    print("⑥ 仓库变更影响策略：用已有证据直接提交")
+    print("═" * 76)
+    demo_repo_impact()
 
     print("\n  🤝 工作区产出:")
     for p in sorted(WS.rglob("*")):
